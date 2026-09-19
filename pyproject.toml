@@ -1,0 +1,22 @@
+[project]
+name = "ppf-c5-runaways"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "RémiBellon", email = "remi.bellon0@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+ppf-c5-runaways = "ppf_c5_runaways:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.8",
+]
