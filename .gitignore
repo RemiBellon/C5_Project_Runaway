@@ -1,9 +1,6 @@
-# Claude Code — outil de travail local, jamais poussé sur GitHub.
-# (En mode équipe partagée, retire ces deux lignes et committe .claude/ + CLAUDE.md.)
-.claude/
-CLAUDE.md
-CLAUDE.local.md
-
 __pycache__/
 *.pyc
 .venv/
+
+# Generated simulation data and figures (regenerable)
+outputs/

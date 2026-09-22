@@ -1,22 +1,207 @@
-[project]
-name = "ppf-c5-runaways"
-version = "0.1.0"
-description = "Add your description here"
-authors = [
-    { name = "RémiBellon", email = "remi.bellon0@gmail.com" }
-]
-requires-python = ">=3.11"
-dependencies = []
-
-[project.scripts]
-ppf-c5-runaways = "ppf_c5_runaways:main"
+# =============================================================================
+#  ppf_c5_runaways
+#  Full-orbit relativistic particle pushers for runaway electrons in tokamaks
+# =============================================================================
+#  Installation :   uv python install 3.14
+#                   uv sync --dev --python 3.14
+#  See README.md (extras : fast, viz, plasma).
+# =============================================================================
 
 [build-system]
-requires = ["uv_build>=0.12.13,<0.13.0"]
-build-backend = "uv_build"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
+
+# -----------------------------------------------------------------------------
+#  Data du projet (PEP 621)
+# -----------------------------------------------------------------------------
+[project]
+name = "ppf_c5_runaways"
+version = "0.1.0"
+
+description = "Relativistic full-orbit particle pushers for runaway electron dynamics in tokamak plasmas"
+readme = "README.md"
+requires-python = ">=3.12"           # dev environnement is set to 3.14
+license = { text = "MIT" }
+authors = [
+    { name = "Claire Pinot", email = "claire.pinot@ip-paris.fr" },
+    { name = "Victoire Morisseau", email = "victoire.morisseau@ip-paris.fr" },
+    { name = "Rémi BELLON", email = "remi.bellon@ip-paris.fr" },
+]
+keywords = [
+    "plasma-physics", "runaway-electrons", "particle-pusher", "boris",
+    "relativistic-dynamics", "tokamak", "numerical-methods",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+
+# --- Kernel : dependancies requiered ---------------
+dependencies = [
+    # Computational core
+    "numpy>=2.1",
+    "scipy>=1.14", # scipy.special will be necessary for collisions term.
+    "numba>=0.63.1",
+    # User configuration (.yaml) and validation
+    "pyyaml>=6.0.2",
+    "pydantic>=2.9",
+    # Labelled data storage (trajectories, parameter scans)
+    "xarray>=2025.1.0",
+    "h5netcdf>=1.4",                 # backend netCDF via h5py : wheels reliable
+    "h5py>=3.12",                    #   on macOS arm64, contrary to netCDF4
+    # Figures
+    "matplotlib>=3.9",
+    # Terminal confort (readable logs, progress bar for long runs)
+    "rich>=13.9",
+]
+
+[project.optional-dependencies]
+# 3D interactive visualization of orbites (in notebook)
+viz = [
+    "plotly>=5.24",
+]
+# Reference plasma formulary (time and space scales) for cross verification
+plasma = [
+    "plasmapy>=2024.10",
+]
+all = [
+    "ppf_c5_runaways[viz,plasma]",
+]
+
+[project.urls]
+Homepage = "https://github.com/RemiBellon/C5_Project_Runaway"
+Issues = "https://github.com/RemiBellon/C5_Project_Runaway/issues"
+
+
+# -----------------------------------------------------------------------------
+#  Developement tools (PEP 735) — installed by `uv sync --dev`
+# -----------------------------------------------------------------------------
 [dependency-groups]
 dev = [
-    "pytest>=9.1.1",
-    "ruff>=0.16.8",
+    # Tests
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "pytest-regressions>=2.5",       # non-regression on references values
+    "pytest-xdist>=3.6",             # `-n auto` : les études de convergence sont
+                                     #   embarrassingly parallel
+    "hypothesis>=6.115",             # property-based testing (invariance de |u|)
+    # code quality
+    "ruff>=0.8",                     # linter + formateur (remplace flake8/black/isort)
+    "mypy>=1.13",
+    "pre-commit>=4.0",
+    # Notebooks d'exploration
+    "jupyterlab>=4.3",
+    "ipykernel>=6.29",
+    "ipympl>=0.9.4",
+    "nbval>=0.11",                   # exécution des notebooks en CI
 ]
+docs = [
+    "sphinx>=8.1",
+    "myst-nb>=1.1",
+    "sphinx-gallery>=0.18",
+    "numpydoc>=1.8",
+    "furo>=2024.8",
+]
+
+
+# -----------------------------------------------------------------------------
+#  uv — résolution restreinte aux plateformes réellement ciblées
+# -----------------------------------------------------------------------------
+[tool.uv]
+# Limiter les plateformes rend uv.lock beaucoup plus petit et évite qu'uv
+# n'échoue à résoudre une combinaison (Windows arm64, musl...) jamais supportée.
+# 'darwin' couvre arm64 (Apple Silicon) et x86_64. Retirer une ligne = retirer
+# le support correspondant.
+environments = [
+    "sys_platform == 'darwin'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+# Le projet lui-même est installé en mode éditable dans l'environnement.
+package = true
+
+
+# -----------------------------------------------------------------------------
+#  Hatchling — layout src/
+# -----------------------------------------------------------------------------
+[tool.hatch.build.targets.wheel]
+packages = ["src/ppf_c5_runaways"]
+
+
+# -----------------------------------------------------------------------------
+#  Ruff — lint + format
+# -----------------------------------------------------------------------------
+[tool.ruff]
+line-length = 88
+target-version = "py312"             # aligned on requires-python
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort (ordre des imports)
+    "B",        # bugbear (pièges courants)
+    "UP",       # pyupgrade (syntaxe moderne)
+    "NPY",      # règles spécifiques NumPy
+    "D",        # docstrings
+    "RUF",      # règles propres à Ruff
+]
+ignore = [
+    "E741",     # variables nommées l, I, O : courant en physique (l = indice modal)
+    "D203", "D213",  # conflits internes à pydocstyle
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]          # pas de docstring obligatoire dans les tests
+"main.py" = ["D", "E402"]  # le pilote est un script, pas un module
+
+
+# -----------------------------------------------------------------------------
+#  pytest
+# -----------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]               # permet `from reference_impl import ...`
+addopts = "--strict-markers -ra --import-mode=importlib"
+markers = [
+    "slow: heavy cases (long time, dt scans) — exclus de la CI par -m 'not slow'",
+    "convergence: étude d'ordre de convergence, potentiellement longue",
+    "physics: validation contre une solution analytique ou une référence publiée",
+    "regression: valeur figée via pytest-regressions",
+]
+filterwarnings = ["error::DeprecationWarning"]
+
+
+# -----------------------------------------------------------------------------
+#  mypy
+# -----------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = true    # le code du coeur est entièrement annoté
+ignore_missing_imports = true   # plasmapy / numba n'exposent pas tous des stubs
+
+
+# -----------------------------------------------------------------------------
+#  Coverage
+# -----------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["src/ppf_c5_runaways"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedError"]
