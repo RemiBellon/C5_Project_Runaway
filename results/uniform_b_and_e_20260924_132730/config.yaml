@@ -1,0 +1,17 @@
+name: uniform_b_and_e
+pusher: boris
+dt: 1.0e-13
+n_steps: 100000
+save_every: 5
+seed: 42
+q: -1.602176634e-19
+m: 9.1093837139e-31
+field:
+  kind: uniform
+  b_field: [0.0, 0.0, 0.1]
+  e_field: [0.0, 1000000.0, 0.0]
+initial:
+  x0:
+  - [0.0, 0.0, 0.0]
+  u0:
+  - [400000000.0, 0.0, 300000000.0]
