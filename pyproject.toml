@@ -38,7 +38,10 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS :: MacOS X",
+<<<<<<< HEAD
     "Operating System :: Microsoft :: Windows",
+=======
+>>>>>>> d6533c5d6b55ae826c529fac57822e96ab73653e
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
@@ -51,6 +54,10 @@ dependencies = [
     # Computational core
     "numpy>=2.1",
     "scipy>=1.14", # scipy.special will be necessary for collisions term.
+<<<<<<< HEAD
+=======
+    "numba>=0.63.1",
+>>>>>>> d6533c5d6b55ae826c529fac57822e96ab73653e
     # User configuration (.yaml) and validation
     "pyyaml>=6.0.2",
     "pydantic>=2.9",
@@ -124,7 +131,10 @@ docs = [
 environments = [
     "sys_platform == 'darwin'",
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
+<<<<<<< HEAD
     "sys_platform == 'win32'",
+=======
+>>>>>>> d6533c5d6b55ae826c529fac57822e96ab73653e
 ]
 # Le projet lui-même est installé en mode éditable dans l'environnement.
 package = true
