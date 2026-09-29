@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+
+# Generated simulation data and figures (regenerable)
+outputs/

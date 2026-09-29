@@ -1,7 +1,7 @@
 name: tokamak       # names the results folder: letters, digits, _ and - only
 pusher: boris          # boris | higuera_cary | vay
 dt: 7.0e-13            # time step [s]
-n_steps: 30         # number of time steps
+n_steps: 800000         # number of time steps
 save_every: 5          # keep one state every 5 steps (must divide n_steps)
 seed: 42               # random seed (not used yet: needed once collisions exist)
 
@@ -21,6 +21,6 @@ field:
 
 
 initial:
-  x0: [[0, 7.2, 0]]              # positions [m], one row [x, y, z] per particle
+  x0: [[1, 7.2, 0]]              # positions [m], one row [x, y, z] per particle
   u0: [[2.946e08, 5.205e7, 1.8604e07]]      # proper velocities u = gamma*v [m/s], one row per particle
 
