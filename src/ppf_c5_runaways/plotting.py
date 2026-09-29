@@ -448,7 +448,7 @@ def orbit_3d(
         plt.show()
     return figure
 
-def visufields(
+def visu_toroidal_fields(
     result_dir: str | Path,
     pusher: str | Sequence[str] | None = None,
     *,
@@ -456,35 +456,67 @@ def visufields(
     a: float | None = None,
 ) -> Figure:
 
-    N = 30
-    r = np.linspace(0,a,N)
-    phi = np.linspace(0,2*np.pi,N//2)
-
-    R, TH = np.meshgrid(r,phi)
-
     cfg = config.load_config("configs/tokamak_custom_toroidal_boris.yaml")
-    field = fields.custom_toroidal(b0=cfg.field.b0, r0=cfg.field.r0,  q0=cfg.field.q0,  lamb=cfg.field.lamb,  b_r=cfg.field.b_r, b_theta=cfg.field.b_theta, b_phi=cfg.field.b_phi)
+    field = fields.custom_toroidal(
+        b0=cfg.field.b0, r0=cfg.field.r0, q0=cfg.field.q0,
+        lamb=cfg.field.lamb, b_r=cfg.field.b_r,
+        b_theta=cfg.field.b_theta, b_phi=cfg.field.b_phi,
+    )
 
-    X = np.zeros_like(R)
-    Y = r0 + R * np.cos(TH)
-    Z = R * np.sin(TH)
+    N = 20
+    r = np.linspace(0, a, N)
+    theta = np.linspace(0, 2*np.pi, N)
+    R, TH = np.meshgrid(r, theta)
 
-    x_flat = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=-1)
-    e_flat, b_flat = field(x_flat, 0.0)   # b_flat.shape == (N*N, 3)
+    # côté phi = 0 : tube "proche" (Y > 0)
+    X_near = np.zeros_like(R)
+    Y_near = r0 + R * np.cos(TH)
+    Z_near = R * np.sin(TH)
 
-    By_plot = b_flat[:, 1].reshape(N, N//2)
-    Bz_plot = b_flat[:, 2].reshape(N, N//2)
+    # côté phi = pi : tube "opposé" (Y < 0)
+    X_far = np.zeros_like(R)
+    Y_far = -(r0 + R * np.cos(TH))
+    Z_far = R * np.sin(TH)
+
+    def get_B(X, Y, Z):
+        x_flat = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=-1)
+        _, b_flat = field(x_flat, 0.0)
+        Bx = b_flat[:, 0].reshape(X.shape)
+        By = b_flat[:, 1].reshape(X.shape)
+        Bz = b_flat[:, 2].reshape(X.shape)
+        return Bx, By, Bz
+
+    Bx_near, By_near, Bz_near = get_B(X_near, Y_near, Z_near)
+    Bx_far,  By_far,  Bz_far  = get_B(X_far, Y_far, Z_far)
+
+    fig, ax = plt.subplots()
+
+    ax.quiver(Y_near, Z_near, By_near, Bz_near, color="C0", angles='xy',
+              scale_units='xy', scale=5, width=.005, label="phi = 0")
+    ax.quiver(Y_far, Z_far, By_far, Bz_far, color="C1", angles='xy',
+              scale_units='xy', scale=5, width=.005, label="phi = pi")
+
+    theta_cercle = np.linspace(0, 2*np.pi, 200)
+    ax.plot(r0 + a*np.cos(theta_cercle), a*np.sin(theta_cercle), color="C0")
+    ax.plot(-(r0 + a*np.cos(theta_cercle)), a*np.sin(theta_cercle), color="C1")
+
+    ax.axvline(0, color="grey", linestyle="--", linewidth=0.8)  # axe du tokamak
+    ax.set_xlabel("Y (m)")
+    ax.set_ylabel("Z (m)")
+    ax.set_aspect("equal")
+    ax.legend()
+    ax.set_title("Coupe poloïdale complète (plan X=0)")
 
 
     fig, ax = plt.subplots()
-    ax.quiver(Y, Z, By_plot, Bz_plot, color="C0", angles='xy',
-              scale_units='xy', scale=0.5, width=.005)
-
-
-
-    phi_cercle = np.linspace(0,2*np.pi,200)
-    ax.plot(r0+(a)*np.cos(phi_cercle),(a)*np.sin(phi_cercle))
-    ax.set_aspect("equal")
+    r = np.linspace(-r0 - a, r0 + a, 100)
+    plt.plot(r , np.sqrt(get_B(r,np.zeros(len(r)),np.zeros(len(r)))[0]**2 + get_B(r,np.zeros(len(r)),np.zeros(len(r)))[1]**2 + get_B(r,np.zeros(len(r)),np.zeros(len(r)))[2]**2))
+    plt.ylim(3,8)
+    plt.xlim(-r0 - a, r0 + a)
+    plt.axvline(x=-r0 - a, color="grey", linestyle="--")
+    plt.axvline(x=-r0 + a, color="grey", linestyle="--")
+    plt.axvline(x=r0 -a , color="grey", linestyle="--")
+    plt.axvline(x=r0 + a, color="grey", linestyle="--")
+    ax.axvspan(xmin=-r0 + a, xmax=r0 - a, hatch="//", facecolor="none", edgecolor="grey")
     plt.show()
-    plt.xlim(4,7)
     return fig
