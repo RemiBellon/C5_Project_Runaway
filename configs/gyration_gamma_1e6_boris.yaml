@@ -1,0 +1,17 @@
+name: gyration_gamma_1e6
+pusher: boris
+dt: 1.428954703096425e-07
+n_steps: 10000
+save_every: 10
+seed: 42
+q: -1.602176634e-19
+m: 9.1093837139e-31
+field:
+  kind: uniform_cartesian
+  b_field: [0.0, 0.0, 2.5]
+  e_field: [0.0, 0.0, 0.0]
+initial:
+  x0:
+  - [0.0, 0.0, 0.0]
+  u0:
+  - [0.0, -299792457999850.1, 0.0]

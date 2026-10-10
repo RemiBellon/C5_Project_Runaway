@@ -1,0 +1,126 @@
+"""Run a simulation from a .yaml file: read it, compute, write the results."""
+
+import shutil
+from pathlib import Path
+
+import numpy as np
+
+from ppf_c5_runaways import fields
+from ppf_c5_runaways.config import load_config
+from ppf_c5_runaways.diagnostics import step_jacobian_determinant
+from ppf_c5_runaways.integrate import integrate
+from ppf_c5_runaways.io import (
+    CONFIG_FILENAME,
+    create_result_dir,
+    list_results,
+    write_result,
+)
+from ppf_c5_runaways.pushers import get_pusher
+
+
+def pusher(
+    config_path: str | Path,
+    result_dir: str | Path | None = None,
+    *,
+    base_dir: str | Path = "results",
+    phase_space_volume: bool = False,
+) -> Path:
+    """
+    Run the simulation described by a .yaml file and save its trajectories.
+
+    With ``phase_space_volume=True``, the Jacobian determinant of every step is also
+    measured (``diagnostics.step_jacobian_determinant``) and stored, for
+    ``plotting.phase_space_volume``. It needs ``save_every: 1`` (the volume change of
+    the run is the product over all the steps) and costs about 12 times the run.
+    """
+    config = load_config(config_path)
+    push = get_pusher(config.pusher)  # fails first if the pusher does not exist
+    if phase_space_volume and config.save_every != 1:
+        raise ValueError(
+            "phase_space_volume=True needs save_every: 1 in the configuration, so "
+            f"that every step is measured; got save_every: {config.save_every}"
+        )
+
+    # Every check that can fail is done before the computation, which can be long.
+    if result_dir is not None:
+        result_dir = Path(result_dir)
+        if not result_dir.is_dir():
+            raise FileNotFoundError(f"Results folder not found: {result_dir}")
+        stored = load_config(result_dir / CONFIG_FILENAME)
+        ignored = {"pusher", "name"}
+        new_case = config.model_dump(exclude=ignored)
+        stored_case = stored.model_dump(exclude=ignored)
+        different = [key for key in new_case if new_case[key] != stored_case[key]]
+        if different:
+            raise ValueError(
+                f"Cannot add this run to {result_dir}: it does not describe the same "
+                f"case as the one stored there (different: {different}). A results "
+                "folder holds one physical case, so that pushers are compared "
+                "fairly. Only 'pusher' and 'name' may differ."
+            )
+        if config.pusher in list_results(result_dir):
+            raise FileExistsError(
+                f"{result_dir} already holds a result for {config.pusher!r}. Results "
+                "are never overwritten: run again without result_dir to make a new "
+                "folder."
+            )
+    if config.field.kind == "uniform_cartesian":
+        field = fields.uniform(
+            b_field=config.field.b_field, e_field=config.field.e_field
+        )
+    elif config.field.kind == "mirror":
+        field = fields.magnetic_mirror(
+            b0=config.field.b0, length=config.field.length
+        )
+    elif config.field.kind == "tokamak":
+        field = fields.custom_toroidal(b0=config.field.b0, r0=config.field.r0,
+                                       q0=config.field.q0,  lamb=config.field.lamb,  b_r=config.field.b_r,
+                                       b_theta=config.field.b_theta, b_phi=config.field.b_phi)
+    else:
+        raise ValueError(
+            f"The field kind {config.field.kind!r} has no field function yet. "
+            "Available: 'uniform_cartesian', 'mirror', 'tokamak'."
+        )
+    t, x, u, u_centered = integrate(
+        x0=np.array(config.initial.x0),
+        u0=np.array(config.initial.u0),
+        field=field,
+        push=push,
+        dt=config.dt,
+        n_steps=config.n_steps,
+        save_every=config.save_every,
+        q=config.q,
+        m=config.m,
+    )
+    # Magnetic field at each saved position and time, for the diagnostics that
+    # need it (magnetic moment, gyration phase): plotting never evaluates a field.
+    b_field = np.empty_like(x)
+    for k in range(t.size):
+        _, b_field[k] = field(x[k], t[k])
+    # Determinant of the step that starts at each saved state (x^n, u^{n-1/2}).
+    step_determinant = None
+    if phase_space_volume:
+        step_determinant = step_jacobian_determinant(
+            push, field, t, x, u, config.dt, config.q, config.m
+        )
+
+    created = result_dir is None
+    if result_dir is None:
+        result_dir = create_result_dir(base_dir, config)
+    try:
+        write_result(
+            result_dir,
+            config.pusher,
+            t,
+            x,
+            u,
+            config.dt,
+            u_centered=u_centered,
+            b_field=b_field,
+            step_jacobian_determinant=step_determinant,
+        )
+    except BaseException:
+        if created:
+            shutil.rmtree(result_dir)  # do not leave an empty results folder
+        raise
+    return result_dir

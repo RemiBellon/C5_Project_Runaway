@@ -9,7 +9,7 @@ q: -1.602176634e-19    # charge [C]: negative for an electron
 m: 9.1093837139e-31    # mass [kg]
 
 field:
-  kind: uniform
+  kind: uniform_cartesian
   b_field: [0, 0, 0.05]   # [T]
   e_field: [0, 100000, 0]     # [V/m]
 

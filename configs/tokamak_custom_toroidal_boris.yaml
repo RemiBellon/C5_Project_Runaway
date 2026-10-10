@@ -8,19 +8,19 @@ seed: 42               # random seed (not used yet: needed once collisions exist
 q: -1.602176634e-19    # charge [C]: negative for an electron
 m: 9.1093837139e-31    # mass [kg]
 
-#config proposée dans l'article 
+#config proposée dans l'article
 field:
   kind: tokamak
-  b0: 5.3
-  r0: 6.2
+  b0: 5.3 # T
+  r0: 6.2 # m
   lamb : 4
   q0 : 1.6
   b_r: "0"
-  b_theta: "b0 * r * q0 * (1 + r**2/lamb**2) * 1 / r0*(1 + (r/r0)*cos(theta))"
+  b_theta: "(r/r0)*b0/(q0*(1+(r/lamb)**2))*1/(1+(r/r0)cos(theta))"
   b_phi: "b0 * 1 / (1 + (r/r0)*cos(theta))"
 
 
 initial:
-  x0: [[1, 7.2, 0]]              # positions [m], one row [x, y, z] per particle
+  x0: [[1, 7.2, 0]]                         # positions [m], one row [x, y, z] per particle
   u0: [[2.946e08, 5.205e7, 1.8604e07]]      # proper velocities u = gamma*v [m/s], one row per particle
 

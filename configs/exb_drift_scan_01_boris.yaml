@@ -1,0 +1,17 @@
+name: exb_drift_scan_01
+pusher: boris
+dt: 1.1371828771408152e-12
+n_steps: 2000
+save_every: 1
+seed: 42
+q: -1.602176634e-19
+m: 9.1093837139e-31
+field:
+  kind: uniform_cartesian
+  b_field: [0.0, 0.0, 2.5]
+  e_field: [7494436.737530702, 0.0, 0.0]
+initial:
+  x0:
+  - [0.0, 0.0, 0.0]
+  u0:
+  - [0.0, -2997924.58, 0.0]
