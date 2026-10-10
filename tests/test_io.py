@@ -39,7 +39,11 @@ def _config() -> RunConfig:
         seed=42,
         q=-1.602176634e-19,
         m=9.1093837139e-31,
-        field={"kind": "uniform", "b_field": [0, 0, 2.5], "e_field": [0, 0, 0]},
+        field={
+            "kind": "uniform_cartesian",
+            "b_field": [0, 0, 2.5],
+            "e_field": [0, 0, 0],
+        },
         initial={"x0": [[0, 0, 0]], "u0": [[1.0e7, 0, 1.0e6]]},
     )
 
@@ -190,28 +194,48 @@ def test_folder_is_removed_when_a_step_fails(tmp_path, monkeypatch):
 
 
 def _trajectories(seed: int = 0):
-    """Made-up trajectories: 4 saved states of 2 particles, with time step 1e-12 s."""
+    """Made-up trajectories: 4 saved states of 2 particles, with time step 1e-12 s.
+
+    Returned as the keyword arguments of ``write_result``, after ``pusher_name``.
+    """
     rng = np.random.default_rng(seed)
-    t = np.array([0.0, 2.0e-12, 4.0e-12, 6.0e-12])
-    return t, rng.normal(size=(4, 2, 3)), rng.normal(size=(4, 2, 3)), 1.0e-12
+    return {
+        "t": np.array([0.0, 2.0e-12, 4.0e-12, 6.0e-12]),
+        "x": rng.normal(size=(4, 2, 3)),
+        "u": rng.normal(size=(4, 2, 3)),
+        "dt": 1.0e-12,
+        "u_centered": rng.normal(size=(4, 2, 3)),
+        "b_field": rng.normal(size=(4, 2, 3)),
+    }
 
 
 def test_written_trajectories_are_read_back_exactly(tmp_path):
     # Independent truth: the arrays given to write_result. Exact equality, since
-    # netCDF stores float64 without loss. The time of u is the time of x minus dt/2.
+    # netCDF stores float64 without loss. The time of u is the time of x minus dt/2;
+    # u_centered is at the time of x.
     run_dir = create_result_dir(tmp_path, _config(), now=_NOW)
-    t, x, u, dt = _trajectories()
+    written = _trajectories()
 
-    write_result(run_dir, "boris", t, x, u, dt)
+    write_result(run_dir, "boris", **written)
     result = read_result(run_dir, "boris")
 
-    np.testing.assert_array_equal(result["x"].values, x)
-    np.testing.assert_array_equal(result["u"].values, u)
-    np.testing.assert_array_equal(result["time"].values, t)
-    np.testing.assert_allclose(result["time_half"].values, t - 0.5e-12, rtol=1e-15)
+    np.testing.assert_array_equal(result["x"].values, written["x"])
+    np.testing.assert_array_equal(result["u"].values, written["u"])
+    np.testing.assert_array_equal(result["u_centered"].values, written["u_centered"])
+    np.testing.assert_array_equal(result["b_field"].values, written["b_field"])
+    np.testing.assert_array_equal(result["time"].values, written["t"])
+    np.testing.assert_allclose(
+        result["time_half"].values, written["t"] - 0.5e-12, rtol=1e-15
+    )
     assert result["x"].dims == ("time", "particle", "axis")
+    assert result["u_centered"].dims == ("time", "particle", "axis")
+    assert result["u"].dims == ("time_half", "particle", "axis")
+    assert result["b_field"].dims == ("time", "particle", "axis")
+    assert result["u_centered"].attrs["units"] == "m/s"
+    assert result["b_field"].attrs["units"] == "T"
+    assert "u_centered" in result.attrs["convention"]
     assert result.attrs["pusher"] == "boris"
-    assert result.attrs["dt"] == dt
+    assert result.attrs["dt"] == written["dt"]
 
 
 def test_a_second_pusher_is_added_to_the_same_folder_without_touching_the_first(
@@ -219,32 +243,52 @@ def test_a_second_pusher_is_added_to_the_same_folder_without_touching_the_first(
 ):
     # The reason for one group per pusher: run Boris today, add Vay tomorrow.
     run_dir = create_result_dir(tmp_path, _config(), now=_NOW)
-    t, x_boris, u_boris, dt = _trajectories(seed=1)
-    _, x_vay, u_vay, _ = _trajectories(seed=2)
+    boris, vay = _trajectories(seed=1), _trajectories(seed=2)
 
     assert list_results(run_dir) == []  # nothing written yet
-    write_result(run_dir, "boris", t, x_boris, u_boris, dt)
-    write_result(run_dir, "vay", t, x_vay, u_vay, dt)
+    write_result(run_dir, "boris", **boris)
+    write_result(run_dir, "vay", **vay)
 
     assert list_results(run_dir) == ["boris", "vay"]
-    np.testing.assert_array_equal(read_result(run_dir, "boris")["x"].values, x_boris)
-    np.testing.assert_array_equal(read_result(run_dir, "vay")["x"].values, x_vay)
+    for name, written in (("boris", boris), ("vay", vay)):
+        result = read_result(run_dir, name)
+        np.testing.assert_array_equal(result["x"].values, written["x"])
+        np.testing.assert_array_equal(
+            result["u_centered"].values, written["u_centered"]
+        )
 
 
 def test_an_existing_result_is_never_overwritten(tmp_path):
     run_dir = create_result_dir(tmp_path, _config(), now=_NOW)
-    t, x, u, dt = _trajectories(seed=1)
-    write_result(run_dir, "boris", t, x, u, dt)
+    written = _trajectories(seed=1)
+    write_result(run_dir, "boris", **written)
 
     with pytest.raises(FileExistsError, match="never overwritten"):
-        write_result(run_dir, "boris", t, x + 1.0, u, dt)
+        write_result(run_dir, "boris", **{**written, "x": written["x"] + 1.0})
 
-    np.testing.assert_array_equal(read_result(run_dir, "boris")["x"].values, x)
+    np.testing.assert_array_equal(
+        read_result(run_dir, "boris")["x"].values, written["x"]
+    )
+
+
+@pytest.mark.parametrize("name", ["u_centered", "b_field"])
+def test_u_centered_and_b_field_are_required(tmp_path, name):
+    # A result without the velocity at whole steps, or without the field felt by the
+    # particle, could not be diagnosed correctly later: writing one must be
+    # impossible, not merely discouraged.
+    run_dir = create_result_dir(tmp_path, _config(), now=_NOW)
+    arguments = _trajectories()
+    del arguments[name]
+
+    with pytest.raises(TypeError, match=name):
+        write_result(run_dir, "boris", **arguments)
+
+    assert not (run_dir / DATA_FILENAME).exists()
 
 
 def test_reading_a_missing_pusher_lists_the_available_ones(tmp_path):
     run_dir = create_result_dir(tmp_path, _config(), now=_NOW)
-    write_result(run_dir, "boris", *_trajectories())
+    write_result(run_dir, "boris", **_trajectories())
 
     with pytest.raises(ValueError, match=r"'vay'.*Available: \['boris'\]"):
         read_result(run_dir, "vay")
@@ -264,19 +308,13 @@ def test_reading_a_folder_without_data_says_so(tmp_path):
         ({"dt": 0.0}, "dt must be"),
         ({"x": np.zeros((4, 3))}, "x must have shape"),
         ({"u": np.zeros((4, 1, 3))}, "u must have the same shape"),
+        ({"u_centered": np.zeros((4, 1, 3))}, "u_centered must have the same shape"),
+        ({"b_field": np.zeros((4, 1, 3))}, "b_field must have the same shape"),
     ],
 )
 def test_wrong_arguments_are_refused_and_nothing_is_written(tmp_path, change, message):
     run_dir = create_result_dir(tmp_path, _config(), now=_NOW)
-    t, x, u, dt = _trajectories()
-    arguments = {
-        "pusher_name": "boris",
-        "t": t,
-        "x": x,
-        "u": u,
-        "dt": dt,
-        **change,
-    }
+    arguments = {"pusher_name": "boris", **_trajectories(), **change}
 
     with pytest.raises(ValueError, match=message):
         write_result(run_dir, **arguments)

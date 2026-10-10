@@ -1,8 +1,9 @@
-"""Tests of ``ppf_c5_runaways.fields`` (``uniform``)."""
+"""Tests of ``ppf_c5_runaways.fields`` (``uniform``, ``magnetic_mirror``)."""
 
 import numpy as np
 import pytest
 
+from ppf_c5_runaways import fields
 from ppf_c5_runaways.fields import uniform
 
 B = [0.0, 0.0, 2.5]  # T
@@ -186,3 +187,58 @@ def test_positions_of_wrong_shape_are_refused_with_a_hint(bad_x):
         field(bad_x, 0.0)
 
     assert "(1, 3)" in str(excinfo.value)  # the message tells how to fix it
+
+
+# --- magnetic_mirror -----------------------------------------------------------------
+
+
+def test_mirror_field_matches_equation_59_at_hand_computed_points():
+    # Independent truth: Ripperda et al. (2018, Eq. 59) evaluated by hand with
+    # B0 = 2 T and L = 10 m. Centre: (0, 0, B0). On the axis at z = L: (0, 0, 2 B0).
+    # At (1, -2, 5) m: z/L^2 = 0.05 m^-1, so B = 2 (-0.05, 0.1, 1.25) T.
+    field = fields.magnetic_mirror(b0=2.0, length=10.0)
+    x = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 10.0], [1.0, -2.0, 5.0]])
+
+    e_field, b_field = field(x, 0.0)
+
+    expected = np.array([[0.0, 0.0, 2.0], [0.0, 0.0, 4.0], [-0.1, 0.2, 2.5]])
+    np.testing.assert_allclose(b_field, expected, rtol=1e-15, atol=1e-15)
+    np.testing.assert_array_equal(e_field, np.zeros((3, 3)))
+
+
+def test_mirror_field_has_zero_divergence():
+    # Independent truth: div B = 0 (no magnetic monopole). The field is a quadratic
+    # polynomial, so central differences are exact up to rounding: with h = 1e-3 L
+    # and |B| ~ B0, the rounding of each difference is about eps B0 / h ~ 2e-13 B0/L.
+    b0, length, h = 2.5, 20.0, 0.02
+    field = fields.magnetic_mirror(b0=b0, length=length)
+    rng = np.random.default_rng(3)
+    points = rng.uniform(-length, length, size=(50, 3))
+
+    divergence = np.zeros(50)
+    for axis in range(3):
+        step = np.zeros(3)
+        step[axis] = h
+        b_plus = field(points + step, 0.0)[1][:, axis]
+        b_minus = field(points - step, 0.0)[1][:, axis]
+        divergence += (b_plus - b_minus) / (2.0 * h)
+
+    np.testing.assert_allclose(divergence, 0.0, atol=1e-11 * b0 / length)
+
+
+@pytest.mark.parametrize(
+    ("change", "name"),
+    [({"b0": 0.0}, "b0"), ({"b0": -1.0}, "b0"), ({"length": float("inf")}, "length")],
+)
+def test_mirror_refuses_a_non_positive_or_non_finite_parameter(change, name):
+    arguments = {"b0": 2.5, "length": 20.0, **change}
+
+    with pytest.raises(ValueError, match=name):
+        fields.magnetic_mirror(**arguments)
+
+
+def test_mirror_refuses_positions_of_the_wrong_shape():
+    field = fields.magnetic_mirror(b0=2.5, length=20.0)
+
+    with pytest.raises(ValueError, match=r"shape \(n_part, 3\)"):
+        field(np.zeros(3), 0.0)

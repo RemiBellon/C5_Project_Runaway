@@ -438,14 +438,31 @@ def test_relativistic_acceleration_error_decreases_as_dt_squared(push, u_over_c)
 
 # --- property-based -------------------------------------------------------------
 
-_VECTOR = st.tuples(*[st.floats(-1.0, 1.0)] * 3)
+# Direction of u: its length is set apart, by _U_OVER_C. Directions shorter than 0.1
+# are dropped, so that normalising never divides by a number close to zero.
+_DIRECTION = st.tuples(*[st.floats(-1.0, 1.0)] * 3).filter(
+    lambda vector: np.linalg.norm(vector) > 0.1
+)
+
+# |u| / c: either exactly 0 (a particle at rest), or from 1e-4 (v = 30 km/s, far
+# below any thermal electron of a tokamak) to 100 (gamma = 100, runaway regime).
+# Below about 1e-150, |u|^2 in m^2/s^2 falls under the smallest normal float64
+# (2.2e-308) and loses digits: a floating-point artefact, not a property of the
+# schemes, so these meaningless speeds are not generated.
+_U_OVER_C = st.one_of(st.just(0.0), st.floats(1.0e-4, 100.0))
+
+
+def _proper_velocity(direction, u_over_c):
+    """``u`` [m/s] of shape ``(1, 3)``, along ``direction``, of norm ``u_over_c c``."""
+    unit = np.array([direction]) / np.linalg.norm(direction)
+    return unit * u_over_c * c
 
 
 @all_pushers
 @given(
     b_field=st.tuples(*[st.floats(-10.0, 10.0)] * 3),
-    direction=_VECTOR,
-    u_over_c=st.floats(0.0, 100.0),
+    direction=_DIRECTION,
+    u_over_c=_U_OVER_C,
     dt=st.floats(1.0e-15, 1.0e-9),
     sign=st.sampled_from([-1.0, 1.0]),
 )
@@ -457,7 +474,7 @@ def test_speed_is_conserved_for_any_b_u_and_dt(
     # dt, |u| does not change. Tolerance 1e-12: one step, rounding of a few 1e-16
     # amplified at most by |tvec| ~ 1e3 in the intermediate u' and reduced again by
     # |svec| ~ 1e-3.
-    u = np.array([direction]) * u_over_c * c
+    u = _proper_velocity(direction, u_over_c)
     field = fields.uniform(b_field=b_field, e_field=[0.0, 0.0, 0.0])
 
     _, u_new = push(np.zeros((1, 3)), u, field, 0.0, sign * dt, Q, M)
@@ -471,8 +488,8 @@ def test_speed_is_conserved_for_any_b_u_and_dt(
 @given(
     b_field=st.tuples(*[st.floats(-10.0, 10.0)] * 3),
     e_field=st.tuples(*[st.floats(-1.0e9, 1.0e9)] * 3),
-    direction=_VECTOR,
-    u_over_c=st.floats(0.0, 100.0),
+    direction=_DIRECTION,
+    u_over_c=_U_OVER_C,
     dt=st.floats(1.0e-15, 1.0e-9),
 )
 def test_particle_never_moves_faster_than_light(
@@ -482,7 +499,7 @@ def test_particle_never_moves_faster_than_light(
     # x = 0 at the start so that the displacement is computed without rounding.
     # The largest u reached is about 600 c, where 1 - v/c = 1 / (2 gamma^2) = 1e-6:
     # far above rounding (1e-16), so the comparison with c is meaningful.
-    u = np.array([direction]) * u_over_c * c
+    u = _proper_velocity(direction, u_over_c)
     field = fields.uniform(b_field=b_field, e_field=e_field)
 
     x_new, _ = push(np.zeros((1, 3)), u, field, 0.0, dt, Q, M)

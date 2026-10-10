@@ -25,7 +25,7 @@ def _valid() -> dict:
         "q": -1.602176634e-19,
         "m": 9.1093837139e-31,
         "field": {
-            "kind": "uniform",
+            "kind": "uniform_cartesian",
             "b_field": [0, 0, 2.5],
             "e_field": [0, 0, 0],
         },
@@ -58,7 +58,7 @@ def _yaml_text(**raw: str) -> str:
         "seed": "42",
         "q": "-1.602176634e-19",
         "m": "9.1093837139e-31",
-        "field": "{kind: uniform, b_field: [0, 0, 2.5], e_field: [0, 0, 0]}",
+        "field": "{kind: uniform_cartesian, b_field: [0, 0, 2.5], e_field: [0, 0, 0]}",
         "initial": "{x0: [[0, 0, 0]], u0: [[1.0e7, 0, 1.0e6]]}",
         **raw,
     }
@@ -363,12 +363,21 @@ def test_load_config_non_mapping_top_level_raises(tmp_path, text):
         ({"unknown_key": "1"}, "unknown_key"),  # typo in a .yaml must not pass
         ({"q": "0"}, "non-zero"),
         ({"m": "-1.0e-30"}, "m"),
-        ({"field": "{kind: uniform, b_field: [0, 0], e_field: [0, 0, 0]}"}, "b_field"),
         (
-            {"field": "{kind: uniform, b_field: [0, 0, .nan], e_field: [0, 0, 0]}"},
+            {"field": "{kind: uniform_cartesian, b_field: [0, 0], e_field: [0, 0, 0]}"},
             "b_field",
         ),
-        ({"field": "{kind: uniform, b_field: [0, 0, 1]}"}, "e_field"),  # missing
+        (
+            {
+                "field": "{kind: uniform_cartesian, b_field: [0, 0, .nan], "
+                "e_field: [0, 0, 0]}"
+            },
+            "b_field",
+        ),
+        (
+            {"field": "{kind: uniform_cartesian, b_field: [0, 0, 1]}"},
+            "e_field",
+        ),  # missing
         ({"initial": "{x0: [[0, 0, 0]], u0: []}"}, "u0"),
         ({"initial": "{x0: [[0, 0, 0]], u0: [[1, 0, 0], [2, 0, 0]]}"}, "one row"),
     ],
@@ -393,7 +402,7 @@ seed: 42
 q: -1.602176634e-19       # signed charge [C]
 m: 9.1093837139e-31       # mass [kg]
 field:
-  kind: uniform
+  kind: uniform_cartesian
   b_field: [0, 0, 2.5]    # [T]
   e_field: [0, 0, 0]      # [V/m]
 initial:
@@ -457,7 +466,7 @@ seed: 42
 q: -1.602176634e-19
 m: 9.1093837139e-31
 field:
-  kind: uniform
+  kind: uniform_cartesian
   b_field: [0.0, 0.0, 2.5]
   e_field: [0.0, 0.0, 0.0]
 initial:
@@ -535,7 +544,7 @@ def test_save_then_load_is_identity_for_any_valid_config(
         seed=seed,
         q=q,
         m=m,
-        field={"kind": "uniform", "b_field": b_field, "e_field": e_field},
+        field={"kind": "uniform_cartesian", "b_field": b_field, "e_field": e_field},
         initial={
             "x0": [x for x, _ in particles],
             "u0": [u for _, u in particles],
@@ -587,3 +596,35 @@ def test_save_config_refuses_an_invalid_config_and_writes_nothing(
         save_config(invalid, path)
 
     assert not path.exists()
+
+
+# --- magnetic mirror field ---------------------------------------------------------
+
+
+def test_mirror_field_is_read_with_its_two_parameters():
+    config = RunConfig(
+        **{**_valid(), "field": {"kind": "mirror", "b0": 2.5, "length": 24.0}}
+    )
+
+    assert (config.field.kind, config.field.b0, config.field.length) == (
+        "mirror",
+        2.5,
+        24.0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ({"kind": "mirror", "b0": 2.5}, "length"),  # missing
+        ({"kind": "mirror", "b0": -2.5, "length": 24.0}, "b0"),  # not positive
+        (
+            {"kind": "mirror", "b0": 2.5, "length": 24.0, "e_field": [0, 0, 0]},
+            "e_field",
+        ),
+    ],
+    ids=["missing_length", "negative_b0", "stray_e_field"],
+)
+def test_invalid_mirror_field_is_refused(field, message):
+    with pytest.raises(ValidationError, match=message):
+        RunConfig(**{**_valid(), "field": field})

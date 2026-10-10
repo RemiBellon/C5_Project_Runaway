@@ -32,7 +32,11 @@ def _config(**change) -> RunConfig:
         "seed": 42,
         "q": -e,
         "m": m_e,
-        "field": {"kind": "uniform", "b_field": [0, 0, BZ], "e_field": [0, 0, 0]},
+        "field": {
+            "kind": "uniform_cartesian",
+            "b_field": [0, 0, BZ],
+            "e_field": [0, 0, 0],
+        },
         "initial": {"x0": [[0, 0, 0]], "u0": [[0.8 * SPEED, 0, 0.6 * SPEED]]},
         **change,
     }
@@ -122,6 +126,37 @@ def test_run_each_pusher_stores_its_own_orbit(tmp_path, pusher):
     )
 
 
+@pytest.mark.physics
+@pytest.mark.parametrize("pusher", ["boris", "higuera_cary", "vay"])
+def test_run_stores_the_velocity_at_the_times_of_the_positions(tmp_path, pusher):
+    # Independent truth: the exact velocity of the gyrating electron,
+    # u_x = u_perp cos(omega t), u_y = u_perp sin(omega t) (an electron turns
+    # counter-clockwise about +z), u_z constant. The stored u_centered is the velocity
+    # at the times of x: its error is of order theta^2 (observed 1.5e-4 to 4.3e-4 of
+    # |u| for theta = 2 pi / 200), below the tolerance theta^2 |u| = 1e-3 |u|. The
+    # half-step u, compared at the same times, is off by about
+    # theta / 2 * u_perp = 1.3e-2 |u| (observed 1.3e-2):
+    # checking that it fails the same tolerance proves the test can tell them apart.
+    config = _config(pusher=pusher)
+
+    result_dir = run.pusher(_write_yaml(tmp_path, config), base_dir=tmp_path)
+
+    result = read_result(result_dir, pusher)
+    angle = OMEGA * result["time"].values
+    u_exact = np.zeros((angle.size, 3))
+    u_exact[:, 0] = 0.8 * SPEED * np.cos(angle)
+    u_exact[:, 1] = 0.8 * SPEED * np.sin(angle)
+    u_exact[:, 2] = 0.6 * SPEED
+    theta = OMEGA * config.dt
+    tolerance = theta**2 * SPEED
+    error_centered = np.linalg.norm(
+        result["u_centered"].values[:, 0] - u_exact, axis=-1
+    )
+    error_half = np.linalg.norm(result["u"].values[:, 0] - u_exact, axis=-1)
+    assert np.max(error_centered) < tolerance
+    assert np.max(error_half) > 10.0 * tolerance
+
+
 def test_run_puts_the_three_pushers_in_the_same_folder_to_compare_them(tmp_path):
     # The workflow of ``main.py``: one folder, one case, one run per pusher.
     boris_yaml = _write_yaml(tmp_path, _config(pusher="boris"), "boris.yaml")
@@ -142,3 +177,53 @@ def test_run_puts_the_three_pushers_in_the_same_folder_to_compare_them(tmp_path)
     ]
     np.testing.assert_array_equal(times[0], times[1])
     np.testing.assert_array_equal(times[0], times[2])
+
+
+def test_run_stores_the_magnetic_field_felt_along_a_mirror_orbit(tmp_path):
+    # Independent truth: Ripperda et al. (2018, Eq. 59) evaluated at the stored
+    # positions, written out here: B = B0 (-x z / L^2, -y z / L^2, 1 + z^2 / L^2).
+    # Tolerance: rounding of the formula (1e-14 of B0).
+    b0, length = 2.5, 5.0
+    config = _config(
+        name="bottle",
+        field={"kind": "mirror", "b0": b0, "length": length},
+        initial={"x0": [[0.05, 0, 0]], "u0": [[0, 0.8 * SPEED, 0.6 * SPEED]]},
+    )
+
+    result_dir = run.pusher(_write_yaml(tmp_path, config), base_dir=tmp_path)
+
+    result = read_result(result_dir, "boris")
+    x = result["x"].values[:, 0]
+    expected = np.empty_like(x)
+    expected[:, 0] = -b0 * x[:, 0] * x[:, 2] / length**2
+    expected[:, 1] = -b0 * x[:, 1] * x[:, 2] / length**2
+    expected[:, 2] = b0 * (1.0 + x[:, 2] ** 2 / length**2)
+    np.testing.assert_allclose(
+        result["b_field"].values[:, 0], expected, rtol=0.0, atol=1e-14 * b0
+    )
+
+
+def test_run_measures_the_phase_space_volume_only_when_asked(tmp_path):
+    # Truth: Boris preserves the phase-space volume exactly (Higuera & Cary 2017,
+    # Sec. V), so every stored step determinant is 1 to the finite-difference
+    # accuracy (1e-8, see test_diagnostics). Without the option nothing is stored.
+    config = _config(save_every=1)
+    yaml_path = _write_yaml(tmp_path, config)
+
+    with_volume = run.pusher(
+        yaml_path, base_dir=tmp_path / "with", phase_space_volume=True
+    )
+    without = run.pusher(yaml_path, base_dir=tmp_path / "without")
+
+    determinants = read_result(with_volume, "boris")["step_jacobian_determinant"]
+    np.testing.assert_allclose(determinants.values, 1.0, rtol=0.0, atol=1e-8)
+    assert "step_jacobian_determinant" not in read_result(without, "boris")
+
+
+def test_run_refuses_the_volume_measure_when_steps_are_skipped(tmp_path):
+    yaml_path = _write_yaml(tmp_path, _config(save_every=10))
+
+    with pytest.raises(ValueError, match="save_every: 1"):
+        run.pusher(yaml_path, base_dir=tmp_path / "results", phase_space_volume=True)
+
+    assert not (tmp_path / "results").exists()  # checked before any computation
