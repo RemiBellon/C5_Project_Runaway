@@ -24,41 +24,34 @@ type Pusher = Callable[
 def _check_push_arguments(
     x: NDArray[np.float64],
     u: NDArray[np.float64],
-    field: Field,
     t: float,
     dt: float,
     q: float,
     m: float,
-) -> tuple[
-    NDArray[np.float64],
-    NDArray[np.float64],
-    NDArray[np.float64],
-    NDArray[np.float64],
-]:
-    """Check the arguments of a pusher, then evaluate the field once.
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Check the arguments of a pusher, before anything is computed.
 
     Every pusher starts with this call, so they all refuse the same wrong inputs
-    with the same messages.
+    with the same messages. The field is checked separately, when it is evaluated
+    (see ``_evaluate_field``).
 
     Parameters
     ----------
-    x, u, field, t, dt, q, m
+    x, u, t, dt, q, m
         The arguments of a pusher, see ``boris``.
 
     Returns
     -------
     x, u : ndarray, shape (n_part, 3)
         The positions [m] and proper velocities [m/s] as ``float64`` arrays.
-    e_field, b_field : ndarray, shape (n_part, 3)
-        The electric [V/m] and magnetic [T] fields at ``(x, t)``.
 
     Raises
     ------
     ValueError
         If ``x`` or ``u`` does not have shape ``(n_part, 3)``, if ``u`` and ``x``
-        differ in shape, if the field returns arrays of another shape, or if
-        ``t``, ``dt``, ``q`` or ``m`` is not a finite real number in its range. The
-        message says what was expected and what was received.
+        differ in shape, or if ``t``, ``dt``, ``q`` or ``m`` is not a finite real
+        number in its range. The message says what was expected and what was
+        received.
     """
     x = np.asarray(x, dtype=np.float64)
     u = np.asarray(u, dtype=np.float64)
@@ -86,7 +79,33 @@ def _check_push_arguments(
         raise ValueError(
             f"m must be a finite, strictly positive number [kg], got {m!r}"
         )
+    return x, u
 
+
+def _evaluate_field(
+    field: Field, x: NDArray[np.float64], t: float
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Evaluate the field once at ``(x, t)`` and check the shape of what it returns.
+
+    Parameters
+    ----------
+    field : Field
+        Function ``field(x, t) -> (E, B)`` (see ``ppf_c5_runaways.fields``).
+    x : ndarray, shape (n_part, 3)
+        Positions [m] at which the field is wanted.
+    t : float
+        Time [s] at which the field is wanted.
+
+    Returns
+    -------
+    e_field, b_field : ndarray, shape (n_part, 3)
+        The electric [V/m] and magnetic [T] fields at ``(x, t)``.
+
+    Raises
+    ------
+    ValueError
+        If the field returns an array whose shape is not that of ``x``.
+    """
     e_field, b_field = field(x, t)
     for name, array in (("E", e_field), ("B", b_field)):
         if np.shape(array) != x.shape:
@@ -94,7 +113,7 @@ def _check_push_arguments(
                 f"field(x, t) must return {name} of shape {x.shape}, the shape of x; "
                 f"got shape {np.shape(array)}."
             )
-    return x, u, e_field, b_field
+    return e_field, b_field
 
 
 def _lorentz_factor(u: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -161,19 +180,23 @@ def boris(
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Advance the particles by one time step with the classic Boris scheme.
 
+    Positions and velocities are known at the same time: the step takes
+    ``(x^n, u^n)`` at ``t`` and returns ``(x^{n+1}, u^{n+1})`` at ``t + dt``
+    (synchronized leapfrog of Ripperda et al. 2018, Eqs. 5-8). No half step is needed
+    to start a run, and ``u`` can be used as it is in any diagnostic at ``t``.
+
     Parameters
     ----------
     x : ndarray, shape (n_part, 3)
         Positions ``x^n`` [m] at time ``t``.
     u : ndarray, shape (n_part, 3)
-        Proper velocities ``u^{n-1/2} = gamma * v`` [m/s], half a step *before*
-        ``t``. This offset is the leapfrog convention of the project: to start a
-        run, the initial ``u`` must be moved back by half a step.
+        Proper velocities ``u^n = gamma * v`` [m/s] at time ``t``.
     field : Field
         Function ``field(x, t) -> (E, B)``, each of shape ``(n_part, 3)``, in V/m
-        and T (see ``ppf_c5_runaways.fields``). It is called once, at ``(x, t)``.
+        and T (see ``ppf_c5_runaways.fields``). It is called once, at the middle of
+        the step: ``(x^{n+1/2}, t + dt / 2)``.
     t : float
-        Time [s] of the positions ``x``.
+        Time [s] of ``x`` and ``u``.
     dt : float
         Time step [s], finite and non-zero. A negative ``dt`` steps backward.
     q : float
@@ -187,10 +210,7 @@ def boris(
     x_new : ndarray, shape (n_part, 3)
         Positions ``x^{n+1}`` [m] at time ``t + dt``.
     u_new : ndarray, shape (n_part, 3)
-        Proper velocities ``u^{n+1/2}`` [m/s]. To get the velocity at a whole step,
-        as needed for an energy diagnostic, average two half steps:
-        ``u^n = (u^{n-1/2} + u^{n+1/2}) / 2``. Using ``u^{n-1/2}`` directly there
-        silently destroys the second order of the scheme.
+        Proper velocities ``u^{n+1}`` [m/s] at time ``t + dt``.
 
         Both are new arrays: ``x`` and ``u`` are not modified.
 
@@ -204,18 +224,26 @@ def boris(
 
     Notes
     -----
-    One step (Ripperda et al. 2018, Eqs. 10-12), with ``a = q dt E / (2 m)``::
+    One step (Ripperda et al. 2018, Eqs. 6, 10-12 and 8), with
+    ``a = q dt E / (2 m)`` and ``E``, ``B`` taken at ``(x_half, t + dt / 2)``::
 
+        x_half = x + (dt / 2) u / gamma(u)           first half of the move
         u- = u + a                                   half acceleration by E
         gamma- = sqrt(1 + |u-|^2 / c^2)
         tvec = q dt B / (2 m gamma-)                 (called ``t`` by Ripperda)
         svec = 2 tvec / (1 + |tvec|^2)               (called ``s`` by Ripperda)
         u+ = u- + (u- + u- x tvec) x svec            rotation by B, |u+| = |u-|
         u_new = u+ + a                               half acceleration by E
-        x_new = x + dt u_new / gamma_new             move with the new velocity
+        x_new = x_half + (dt / 2) u_new / gamma(u_new)    second half of the move
 
+    The step is symmetric in time: applying it with ``-dt`` to ``(x_new, u_new)`` at
+    ``t + dt`` gives back ``(x, u)``, up to rounding.
     """
-    x, u, e_field, b_field = _check_push_arguments(x, u, field, t, dt, q, m)
+    x, u = _check_push_arguments(x, u, t, dt, q, m)
+
+    # First half of the move, with the velocity at the start of the step.
+    x_half = x + 0.5 * dt * u / _lorentz_factor(u)
+    e_field, b_field = _evaluate_field(field, x_half, t + 0.5 * dt)
 
     # Half acceleration by E, shape (n_part, 3) [m/s].
     half_kick = q * dt / (2.0 * m) * e_field
@@ -232,8 +260,8 @@ def boris(
 
     u_new = u_plus + half_kick
 
-    # Move with the velocity at the middle of the step, v = u / gamma.
-    x_new = x + dt * u_new / _lorentz_factor(u_new)
+    # Second half of the move, with the velocity at the end of the step.
+    x_new = x_half + 0.5 * dt * u_new / _lorentz_factor(u_new)
     return x_new, u_new
 
 
@@ -254,18 +282,22 @@ def higuera_cary(
     and, in a pure magnetic field, ``|u|``; unlike Boris it also gives the exact
     E x B drift velocity at relativistic speed (Higuera & Cary 2017).
 
+    As for ``boris``, positions and velocities are known at the same time: the step
+    takes ``(x^n, u^n)`` at ``t`` and returns ``(x^{n+1}, u^{n+1})`` at ``t + dt``
+    (synchronized leapfrog of Ripperda et al. 2018, Eqs. 5-8).
+
     Parameters
     ----------
     x : ndarray, shape (n_part, 3)
         Positions ``x^n`` [m] at time ``t``.
     u : ndarray, shape (n_part, 3)
-        Proper velocities ``u^{n-1/2} = gamma * v`` [m/s], half a step *before*
-        ``t`` (leapfrog convention of the project, as for ``boris``).
+        Proper velocities ``u^n = gamma * v`` [m/s] at time ``t``.
     field : Field
         Function ``field(x, t) -> (E, B)``, each of shape ``(n_part, 3)``, in V/m
-        and T. It is called once, at ``(x, t)``.
+        and T. It is called once, at the middle of the step:
+        ``(x^{n+1/2}, t + dt / 2)``.
     t : float
-        Time [s] of the positions ``x``.
+        Time [s] of ``x`` and ``u``.
     dt : float
         Time step [s], finite and non-zero. A negative ``dt`` steps backward.
     q : float
@@ -278,8 +310,7 @@ def higuera_cary(
     x_new : ndarray, shape (n_part, 3)
         Positions ``x^{n+1}`` [m] at time ``t + dt``.
     u_new : ndarray, shape (n_part, 3)
-        Proper velocities ``u^{n+1/2}`` [m/s]. For a velocity at a whole step,
-        average two half steps: ``u^n = (u^{n-1/2} + u^{n+1/2}) / 2``.
+        Proper velocities ``u^{n+1}`` [m/s] at time ``t + dt``.
 
         Both are new arrays: ``x`` and ``u`` are not modified.
 
@@ -291,9 +322,11 @@ def higuera_cary(
 
     Notes
     -----
-    One step (Higuera & Cary 2017, Eqs. 10, 16, 18, 20, 21, 24), with
-    ``eps = q dt E / (2 m)`` and ``beta = q dt B / (2 m)``::
+    One step (Higuera & Cary 2017, Eqs. 10, 16, 18, 20, 21, 24, between the two
+    half moves of Ripperda et al. 2018, Eqs. 6 and 8), with ``eps = q dt E / (2 m)``,
+    ``beta = q dt B / (2 m)`` and ``E``, ``B`` taken at ``(x_half, t + dt / 2)``::
 
+        x_half = x + (dt / 2) u / gamma(u)           first half of the move
         u- = u + eps                                 half acceleration by E
         gamma-^2 = 1 + |u-|^2 / c^2
         gamma_new^4 - (gamma-^2 - |beta|^2) gamma_new^2
@@ -302,14 +335,20 @@ def higuera_cary(
         svec = 2 tvec / (1 + |tvec|^2)
         u+ = u- + (u- + u- x tvec) x svec
         u_new = u+ + eps                             half acceleration by E
-        x_new = x + dt u_new / gamma(u_new)          move with the new velocity
+        x_new = x_half + (dt / 2) u_new / gamma(u_new)    second half of the move
 
     The paper writes Eq. 20 in units where ``c = 1``; the ``c`` above comes from
     writing every momentum as ``u / c``. Only the rotation differs from ``boris``:
     Boris would use ``gamma-`` where this uses ``gamma_new`` (``gamma- >= gamma_new``,
-    Eq. 25).
+    Eq. 25). ``gamma_new`` is the Lorentz factor of the mean momentum
+    ``(u + u_new) / 2`` of the step, not that of ``u_new``. Like ``boris``, the step
+    is symmetric in time.
     """
-    x, u, e_field, b_field = _check_push_arguments(x, u, field, t, dt, q, m)
+    x, u = _check_push_arguments(x, u, t, dt, q, m)
+
+    # First half of the move, with the velocity at the start of the step.
+    x_half = x + 0.5 * dt * u / _lorentz_factor(u)
+    e_field, b_field = _evaluate_field(field, x_half, t + 0.5 * dt)
 
     half_kick = q * dt / (2.0 * m) * e_field  # eps, Eq. 10
     u_minus = u + half_kick  # Eq. 18
@@ -332,7 +371,8 @@ def higuera_cary(
 
     u_new = u_plus + half_kick
 
-    x_new = x + dt * u_new / _lorentz_factor(u_new)
+    # Second half of the move, with the velocity at the end of the step.
+    x_new = x_half + 0.5 * dt * u_new / _lorentz_factor(u_new)
     return x_new, u_new
 
 
@@ -354,18 +394,22 @@ def vay(
     speed, which Boris does not (Vay 2008). It does **not** preserve the
     phase-space volume, unlike Boris and Higuera-Cary (Higuera & Cary 2017, Sec. V).
 
+    As for ``boris``, positions and velocities are known at the same time: the step
+    takes ``(x^n, u^n)`` at ``t`` and returns ``(x^{n+1}, u^{n+1})`` at ``t + dt``
+    (synchronized leapfrog of Ripperda et al. 2018, Eqs. 5-8).
+
     Parameters
     ----------
     x : ndarray, shape (n_part, 3)
         Positions ``x^n`` [m] at time ``t``.
     u : ndarray, shape (n_part, 3)
-        Proper velocities ``u^{n-1/2} = gamma * v`` [m/s], half a step *before*
-        ``t`` (leapfrog convention of the project, as for ``boris``).
+        Proper velocities ``u^n = gamma * v`` [m/s] at time ``t``.
     field : Field
         Function ``field(x, t) -> (E, B)``, each of shape ``(n_part, 3)``, in V/m
-        and T. It is called once, at ``(x, t)``.
+        and T. It is called once, at the middle of the step:
+        ``(x^{n+1/2}, t + dt / 2)``.
     t : float
-        Time [s] of the positions ``x``.
+        Time [s] of ``x`` and ``u``.
     dt : float
         Time step [s], finite and non-zero. A negative ``dt`` steps backward.
     q : float
@@ -378,8 +422,7 @@ def vay(
     x_new : ndarray, shape (n_part, 3)
         Positions ``x^{n+1}`` [m] at time ``t + dt``.
     u_new : ndarray, shape (n_part, 3)
-        Proper velocities ``u^{n+1/2}`` [m/s]. For a velocity at a whole step,
-        average two half steps: ``u^n = (u^{n-1/2} + u^{n+1/2}) / 2``.
+        Proper velocities ``u^{n+1}`` [m/s] at time ``t + dt``.
 
         Both are new arrays: ``x`` and ``u`` are not modified.
 
@@ -392,25 +435,33 @@ def vay(
     Notes
     -----
     Vay's paper puts the velocities at whole steps ``u^i`` and the positions at half
-    steps ``x^{i+1/2}``. This is the project's leapfrog with the labels shifted by
-    half a step: Vay's ``u^i`` is our ``u^{n-1/2}``, his ``x^{i+1/2}`` our ``x^n``,
-    and his ``E^{i+1/2}``, ``B^{i+1/2}`` are the fields at our ``(x^n, t)``.
+    steps ``x^{i+1/2}``. His ``u^i`` is our ``u^n``, his ``x^{i+1/2}`` our ``x_half``,
+    and his ``E^{i+1/2}``, ``B^{i+1/2}`` are the fields at ``(x_half, t + dt / 2)``.
+    The two half moves around his momentum update are those of Ripperda et al.
+    (2018, Eqs. 6 and 8).
 
-    One step (Vay 2008, Eqs. 9-12), with ``eps = q dt E / (2 m)`` and
-    ``tau = q dt B / (2 m)``::
+    One step (Vay 2008, Eqs. 9-12), with ``eps = q dt E / (2 m)``,
+    ``tau = q dt B / (2 m)`` and ``E``, ``B`` taken at ``(x_half, t + dt / 2)``::
 
+        x_half = x + (dt / 2) u / gamma(u)                  first half of the move
         u' = u + 2 eps + (u / gamma(u)) x tau               (Eq. 9)
         gamma_new^4 - (gamma'^2 - |tau|^2) gamma_new^2
                     - (|tau|^2 + u*^2) = 0                  (Eq. 11)
             with gamma'^2 = 1 + |u'|^2 / c^2 and u* = (u' . tau) / c
         tvec = tau / gamma_new,   s = 1 / (1 + |tvec|^2)
         u_new = s (u' + (u' . tvec) tvec + u' x tvec)       (Eq. 12)
-        x_new = x + dt u_new / gamma(u_new)                 move with the new velocity
+        x_new = x_half + (dt / 2) u_new / gamma(u_new)      second half of the move
 
     ``u_new`` solves the implicit equation ``u_new = u' + (u_new / gamma_new) x tau``
-    (Eq. 10); the explicit formulas above are its exact solution.
+    (Eq. 10); the explicit formulas above are its exact solution. Here ``gamma_new``
+    is the Lorentz factor of ``u_new`` itself. Like ``boris``, the step is symmetric
+    in time.
     """
-    x, u, e_field, b_field = _check_push_arguments(x, u, field, t, dt, q, m)
+    x, u = _check_push_arguments(x, u, t, dt, q, m)
+
+    # First half of the move, with the velocity at the start of the step.
+    x_half = x + 0.5 * dt * u / _lorentz_factor(u)
+    e_field, b_field = _evaluate_field(field, x_half, t + 0.5 * dt)
 
     half_kick = q * dt / (2.0 * m) * e_field  # eps
     tau = q * dt / (2.0 * m) * b_field  # dimensionless
@@ -433,7 +484,8 @@ def vay(
     u_dot_t = np.sum(u_prime * tvec, axis=1, keepdims=True)
     u_new = scale * (u_prime + u_dot_t * tvec + np.cross(u_prime, tvec))
 
-    x_new = x + dt * u_new / _lorentz_factor(u_new)
+    # Second half of the move, with the velocity at the end of the step.
+    x_new = x_half + 0.5 * dt * u_new / _lorentz_factor(u_new)
     return x_new, u_new
 
 

@@ -122,11 +122,9 @@ def test_energy_is_kept_in_a_pure_magnetic_field(push, bound, u_over_c):
     field = fields.uniform(b_field=[0.0, 0.0, BZ], e_field=[0.0, 0.0, 0.0])
     u0 = u_over_c * c * np.array([[0.8, 0.0, 0.6]])
 
-    _, _, _, u_centered = integrate(
-        np.zeros((1, 3)), u0, field, push, dt, 10_000, 10, Q, M
-    )
+    _, _, u = integrate(np.zeros((1, 3)), u0, field, push, dt, 10_000, 10, Q, M)
 
-    assert np.max(np.abs(energy_error(u_centered))) < bound
+    assert np.max(np.abs(energy_error(u))) < bound
 
 
 def _drift_case(gamma_drift):
@@ -155,11 +153,9 @@ def test_vay_and_higuera_cary_keep_the_energy_of_the_exb_drift(push, gamma_drift
     # gamma = 100, where E and v x B nearly cancel and amplify it. Bound 1e-10.
     u0, field, dt = _drift_case(gamma_drift)
 
-    _, _, _, u_centered = integrate(
-        np.zeros((1, 3)), u0, field, push, dt, 1000, 10, Q, M
-    )
+    _, _, u = integrate(np.zeros((1, 3)), u0, field, push, dt, 1000, 10, Q, M)
 
-    assert np.max(np.abs(energy_error(u_centered))) < 1e-10
+    assert np.max(np.abs(energy_error(u))) < 1e-10
 
 
 @pytest.mark.physics
@@ -172,11 +168,9 @@ def test_boris_does_not_keep_the_energy_of_the_relativistic_exb_drift(gamma_drif
     # and 1e8 times above the rounding level of the two other schemes.
     u0, field, dt = _drift_case(gamma_drift)
 
-    _, _, _, u_centered = integrate(
-        np.zeros((1, 3)), u0, field, boris, dt, 1000, 10, Q, M
-    )
+    _, _, u = integrate(np.zeros((1, 3)), u0, field, boris, dt, 1000, 10, Q, M)
 
-    assert np.max(np.abs(energy_error(u_centered))) > 1e-2
+    assert np.max(np.abs(energy_error(u))) > 1e-2
 
 
 # --- drift_velocity -----------------------------------------------------------------
@@ -253,7 +247,7 @@ def test_vay_and_higuera_cary_drift_at_the_exact_exb_velocity(push, u_over_c):
     # observed below 6e-14 of |v_E|, bound 1e-12.
     u0, field, v_drift, dt = _launched_at_drift(u_over_c)
 
-    t, x, _, _ = integrate(np.zeros((1, 3)), u0, field, push, dt, 2000, 1, Q, M)
+    t, x, _ = integrate(np.zeros((1, 3)), u0, field, push, dt, 2000, 1, Q, M)
 
     error = np.linalg.norm(drift_velocity(t, x)[0] - v_drift) / np.linalg.norm(v_drift)
     assert error < 1e-12
@@ -269,7 +263,7 @@ def test_boris_drifts_at_a_wrong_velocity_in_the_relativistic_regime(u_over_c):
     # non-relativistic regime Boris is fine (3e-8), which is why it is not tested.
     u0, field, v_drift, dt = _launched_at_drift(u_over_c)
 
-    t, x, _, _ = integrate(np.zeros((1, 3)), u0, field, boris, dt, 2000, 1, Q, M)
+    t, x, _ = integrate(np.zeros((1, 3)), u0, field, boris, dt, 2000, 1, Q, M)
 
     error = np.linalg.norm(drift_velocity(t, x)[0] - v_drift) / np.linalg.norm(v_drift)
     assert error > 1e-3
@@ -317,7 +311,7 @@ def _phase_error_after(push, gamma, n_turns=100, steps_per_turn=100):
     """Phase error of ``push`` after ``n_turns`` exact turns, and the angle theta.
 
     Ripperda et al. (2018, Sec. 3.1.2): velocity perpendicular to a uniform B, one
-    turn resolved by 100 steps. The error is the change of phase of u_centered
+    turn resolved by 100 steps. The error is the change of phase of u
     minus the exact one, omega t, so that a constant offset at t = 0 cancels.
     """
     u_perp = math.sqrt(gamma**2 - 1.0) * c
@@ -327,11 +321,9 @@ def _phase_error_after(push, gamma, n_turns=100, steps_per_turn=100):
     u0 = np.array([[0.0, -u_perp, 0.0]])
     n_steps = n_turns * steps_per_turn
 
-    t, _, _, u_centered = integrate(
-        np.zeros((1, 3)), u0, field, push, dt, n_steps, 10, Q, M
-    )
+    t, _, u = integrate(np.zeros((1, 3)), u0, field, push, dt, n_steps, 10, Q, M)
 
-    phase = gyration_phase(u_centered, [0.0, 0.0, 1.0])[:, 0]
+    phase = gyration_phase(u, [0.0, 0.0, 1.0])[:, 0]
     return (phase[-1] - phase[0]) - omega * t[-1], omega * dt, n_steps
 
 
@@ -519,22 +511,19 @@ def test_phase_error_refuses_states_saved_too_far_apart():
 @pytest.mark.parametrize("pitch", [90.0, 45.0, 10.0])
 @pytest.mark.parametrize("gamma", [1.0 + 5.0e-7, 2.0, 1.0e6], ids=["~1", "2", "1e6"])
 def test_measured_phase_error_is_the_predicted_curve(push, gamma, pitch):
-    # Independent truth: the whole curve e_n = [alpha(dt)/2 - alpha(dt/2)]
-    # + n [alpha(dt) - theta], derived from the rotation angle of each scheme and
-    # the initialisation of integrate (see predicted_gyration_phase_error), with
-    # the angles taken from the papers (Boris 1970; Vay 2008, Eq. 11; Higuera &
-    # Cary 2017, Eq. 20). 10 turns of 100 steps, saved every 10 steps. Observed
-    # agreement below 1.2e-11 rad over the whole curve, including the constant
-    # offset of 8e-6 rad; tolerance 1e-9 rad.
+    # Independent truth: the whole curve e_n = n (alpha - theta), derived from the
+    # rotation angle per step of each scheme (see predicted_gyration_phase_error),
+    # with the angles taken from the papers (Boris 1970; Vay 2008, Eq. 11; Higuera
+    # & Cary 2017, Eq. 20). 10 turns of 100 steps, saved every 10 steps. The error
+    # is exactly zero at t = 0 and reaches 2.6e-3 to 2.1e-2 rad after 10 turns.
+    # Observed agreement below 1e-12 rad over the whole curve; tolerance 1e-9 rad.
     u0 = _pitched_velocity(gamma, pitch)
     dt = _dt_for_exact_angle(2.0 * math.pi / 100, gamma)
     field = fields.uniform(b_field=B_ALONG_Z, e_field=[0.0, 0.0, 0.0])
 
-    t, _, _, u_centered = integrate(
-        np.zeros((1, 3)), u0, field, push, dt, 1000, 10, Q, M
-    )
+    t, _, u = integrate(np.zeros((1, 3)), u0, field, push, dt, 1000, 10, Q, M)
 
-    measured = gyration_phase_error(t, u_centered, u0, B_ALONG_Z, Q, M)
+    measured = gyration_phase_error(t, u, u0, B_ALONG_Z, Q, M)
     predicted = predicted_gyration_phase_error(
         push.__name__, t, u0, B_ALONG_Z, dt, Q, M
     )
@@ -553,11 +542,9 @@ def test_higuera_cary_has_no_third_order_phase_error_at_the_magic_pitch():
     dt = _dt_for_exact_angle(2.0 * math.pi / 100, 1.0e6)
     field = fields.uniform(b_field=B_ALONG_Z, e_field=[0.0, 0.0, 0.0])
 
-    t, _, _, u_centered = integrate(
-        np.zeros((1, 3)), u0, field, higuera_cary, dt, 10_000, 10, Q, M
-    )
+    t, _, u = integrate(np.zeros((1, 3)), u0, field, higuera_cary, dt, 10_000, 10, Q, M)
 
-    error = gyration_phase_error(t, u_centered, u0, B_ALONG_Z, Q, M)
+    error = gyration_phase_error(t, u, u0, B_ALONG_Z, Q, M)
     assert abs(error[-1, 0]) < 1e-3
 
 
@@ -617,10 +604,8 @@ def test_boris_and_higuera_cary_errors_per_turn_over_pitch_angles(gamma):
 
     per_turn = {}
     for push in (boris, higuera_cary):
-        t, _, _, u_centered = integrate(
-            np.zeros((4, 3)), u0, field, push, dt, 1000, 10, Q, M
-        )
-        error = gyration_phase_error(t, u_centered, u0, B_ALONG_Z, Q, M)
+        t, _, u = integrate(np.zeros((4, 3)), u0, field, push, dt, 1000, 10, Q, M)
+        error = gyration_phase_error(t, u, u0, B_ALONG_Z, Q, M)
         per_turn[push] = phase_error_per_turn(t, error, period)
 
     np.testing.assert_allclose(per_turn[boris], boris_per_turn, rtol=0.0, atol=1e-9)
@@ -678,7 +663,7 @@ def _bottle_run(push, epsilon=0.01, steps_per_turn=50):
     x0 = np.array([[r_larmor, 0.0, 0.0]])
     u0 = np.array([[0.0, u_perp, u_perp]])
 
-    t, x, u, _ = integrate(x0, u0, field, push, dt, n_steps, 1, Q, M)
+    t, x, u = integrate(x0, u0, field, push, dt, n_steps, 1, Q, M)
 
     b_field = np.array([field(x[k], t[k])[1] for k in range(t.size)])
     return x, u, b_field, length, r_larmor
@@ -691,7 +676,7 @@ def test_particle_is_reflected_at_the_predicted_mirror_point(push):
     # reflected where |B| = 2 |B(x0)| (Ripperda et al. 2018, Eq. 61): z_max = L for
     # a start on the axis, slightly more here because |B(x0)| = B0 (1 + O(eps^2))
     # off the axis, which is included. The adiabatic theory is exact to order eps
-    # = 1e-2; observed agreement 1.2e-7 of z_max, tolerance 1e-4.
+    # = 1e-2; observed agreement 2.1e-7 of z_max, tolerance 1e-4.
     x, _, b_field, length, _ = _bottle_run(push)
 
     z_max = length * math.sqrt(2.0 * np.linalg.norm(b_field[0, 0]) / BZ - 1.0)
@@ -703,7 +688,7 @@ def test_particle_is_reflected_at_the_predicted_mirror_point(push):
 @all_pushers
 def test_magnetic_moment_is_an_adiabatic_invariant_in_the_bottle(push):
     # Independent truth: mu is conserved to order eps = r_L / L = 1e-2 in a slowly
-    # varying field. Computed with the leapfrog u^{n-1/2}, it varies by 7.5e-6
+    # varying field. Computed with u^n as kept by ``integrate``, it varies by 7.4e-6
     # over a bounce (observed, far below eps: the guiding centre stays on the axis,
     # where the field seen along the circle is uniform to order eps^2). Bound
     # eps^2 / 10 = 1e-5 would be too tight for the scheme, eps / 100 = 1e-4 is used.

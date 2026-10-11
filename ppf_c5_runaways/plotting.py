@@ -2,7 +2,7 @@
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -496,19 +496,18 @@ def energy_error(
     result_dir: str | Path,
     pusher: str | Sequence[str] | None = None,
     *,
-    velocity: Literal["u_centered", "u"] = "u_centered",
     show: bool = True,
     save_path: str | Path | None = None,
 ) -> Figure:
     """
     Draw the relative change of kinetic energy ``|K(t) - K(0)| / K(0)`` in time.
 
-    The energy is computed by ``diagnostics.energy_error``, by default from the
-    velocities at the times of the positions (``u_centered``). The vertical axis is logarithmic, so that a rounding-level error
-    (Higuera-Cary, Vay in an E x B drift) and an error of order 1 (Boris in the same
-    case) can be read on the same figure. In a static B alone, and at the exact
-    E x B drift velocity, ``K`` is constant: the curve is then the error of the
-    scheme.
+    The energy is computed by ``diagnostics.energy_error`` from the velocities ``u``
+    of the results folder, which are at the times of the positions. The vertical
+    axis is logarithmic, so that a rounding-level error (Higuera-Cary, Vay in an
+    E x B drift) and an error of order 1 (Boris in the same case) can be read on the
+    same figure. In a static B alone, and at the exact E x B drift velocity, ``K``
+    is constant: the curve is then the error of the scheme.
 
     Values below the float64 rounding unit ``eps = 2.2e-16`` (including the exact 0
     at ``t = 0``) are drawn at ``eps``, on the grey line labelled "float64
@@ -521,12 +520,6 @@ def energy_error(
     pusher : str or sequence of str, optional
         Which pusher(s) of the folder to draw, for example ``"boris"`` or
         ``["boris", "vay"]``. Default: all the pushers stored in the folder.
-    velocity : {"u_centered", "u"}, optional
-        ``"u_centered"`` (default): the velocity at the times of the positions.
-        ``"u"``: the leapfrog state ``u^{n-1/2}``, drawn at ``time_half``; this is
-        what Boris and Higuera-Cary conserve exactly in a static magnetic field
-        without electric field, and what Ripperda et al. (2018, Figs. 3 and 11)
-        show. Use it only in that case (see ``diagnostics.energy_error``).
     show : bool, optional
         Open the figure in a window. Default ``True``.
     save_path : str or pathlib.Path, optional
@@ -543,12 +536,9 @@ def energy_error(
     FileNotFoundError
         If no pusher is given and the folder holds no trajectories.
     ValueError
-        If ``velocity`` is not one of the two names, a pusher is not in the folder,
-        its result was written before ``u_centered`` was stored (run it again), or
-        a particle starts at rest.
+        If a pusher is not in the folder, its result was written by an older
+        version of the code (see ``io.read_result``), or a particle starts at rest.
     """
-    if velocity not in ("u_centered", "u"):
-        raise ValueError(f"velocity must be 'u_centered' or 'u', got {velocity!r}")
     if pusher is None:
         names = list_results(result_dir)
         if not names:
@@ -561,21 +551,14 @@ def energy_error(
     else:
         names = list(pusher)
     results = {name: read_result(result_dir, name) for name in names}
-    for name, result in results.items():
-        if "u_centered" not in result:
-            raise ValueError(
-                f"The result of {name!r} in {result_dir} has no u_centered: it was "
-                "written before the velocity at whole steps was stored. Run it "
-                "again to get its energy."
-            )
 
     rounding = np.finfo(np.float64).eps
     with plt.rc_context(figure_style()):
         figure, axes = plt.subplots()
         for k, (name, result) in enumerate(results.items()):
-            error = diagnostics.energy_error(result[velocity].values)
+            error = diagnostics.energy_error(result["u"].values)
             shown = np.maximum(np.abs(error), rounding)  # (n_saved, n_part)
-            time = result["time" if velocity == "u_centered" else "time_half"].values
+            time = result["time"].values
             n_part = shown.shape[1]
             for i in range(n_part):
                 if len(results) == 1:
@@ -599,8 +582,6 @@ def energy_error(
             title = f"Energy error, pusher {names[0]!r}, dt = {dt:.3g} s"
         else:
             title = f"Energy error, dt = {dt:.3g} s"
-        if velocity == "u":
-            title += r", from $u^{n-1/2}$"
         axes.set_title(title)
         axes.legend()
 
@@ -817,7 +798,7 @@ def phase_error(
         for k, (name, result) in enumerate(results.items()):
             time = result["time"].values
             error = diagnostics.gyration_phase_error(
-                time, result["u_centered"].values, u0, b_vector, q, m
+                time, result["u"].values, u0, b_vector, q, m
             )
             predicted = None
             if name in ("boris", "vay", "higuera_cary"):
@@ -941,7 +922,6 @@ def magnetic_moment_error(
     result_dir: str | Path,
     pusher: str | Sequence[str] | None = None,
     *,
-    velocity: Literal["u_centered", "u"] = "u",
     show: bool = True,
     save_path: str | Path | None = None,
 ) -> Figure:
@@ -949,8 +929,9 @@ def magnetic_moment_error(
     Draw the relative change of the magnetic moment ``|mu(t) / mu(0) - 1|``.
 
     This is Fig. 12 of Ripperda et al. (2018, Sec. 3.2.1). ``mu = p_perp^2 /
-    (2 m |B|)`` is computed by ``diagnostics.magnetic_moment`` with the stored field
-    at the particle. It is an adiabatic invariant: its relative change oscillates
+    (2 m |B|)`` is computed by ``diagnostics.magnetic_moment`` from the stored
+    velocity ``u`` and the stored field at the particle, both at the times of the
+    positions. It is an adiabatic invariant: its relative change oscillates
     with an amplitude of order ``eps = r_L / L`` in the exact motion too, so only
     a drift from cycle to cycle is an error of the scheme. Logarithmic axis, values
     below the float64 rounding unit drawn on the grey line.
@@ -961,14 +942,6 @@ def magnetic_moment_error(
         Results folder given by ``run.pusher``.
     pusher : str or sequence of str, optional
         Which pusher(s) to draw. Default: all the pushers of the folder.
-    velocity : {"u", "u_centered"}, optional
-        Velocity used for ``p_perp``. Default ``"u"``, the leapfrog state
-        ``u^{n-1/2}``: the average ``u_centered`` of two vectors turned by
-        ``alpha`` has its perpendicular part shortened by ``cos(alpha / 2)``, and
-        since ``alpha`` grows with ``|B|`` this makes ``mu`` vary by about
-        ``alpha^2 / 4`` along a bounce (1.2e-2 at 50 steps per turn in a bottle,
-        against 7e-6 with ``"u"``). In a static magnetic field the half-step shift
-        of the time only costs a relative error of order ``alpha eps``.
     show : bool, optional
         Open the figure in a window. Default ``True``.
     save_path : str or pathlib.Path, optional
@@ -982,11 +955,10 @@ def magnetic_moment_error(
     Raises
     ------
     ValueError
-        If ``velocity`` is not one of the two names, or a result has no stored
-        magnetic field (written before it was stored: run it again).
+        If a result has no stored magnetic field (written before it was stored:
+        run it again), or was written by an older version of the code (see
+        ``io.read_result``).
     """
-    if velocity not in ("u_centered", "u"):
-        raise ValueError(f"velocity must be 'u_centered' or 'u', got {velocity!r}")
     mass = config.load_config(Path(result_dir) / CONFIG_FILENAME).m
     results = _read_selected(result_dir, pusher)
 
@@ -1000,7 +972,7 @@ def magnetic_moment_error(
                     "again to get its magnetic moment."
                 )
             mu = diagnostics.magnetic_moment(
-                result[velocity].values, result["b_field"].values, mass
+                result["u"].values, result["b_field"].values, mass
             )
             shown = np.maximum(np.abs(mu / mu[0] - 1.0), rounding)
             for i in range(shown.shape[1]):
@@ -1014,10 +986,7 @@ def magnetic_moment_error(
         axes.set_yscale("log")
         axes.set_xlabel("t [s]")
         axes.set_ylabel(r"$|\mu(t)\,/\,\mu(0) - 1|$")
-        title = "Magnetic moment"
-        if velocity == "u":
-            title += r", from $u^{n-1/2}$"
-        axes.set_title(title)
+        axes.set_title("Magnetic moment")
         axes.legend()
 
     if save_path is not None:
@@ -1042,7 +1011,7 @@ def phase_space_volume(
     phase_space_volume=True)``, which needs ``save_every: 1``). Boris and
     Higuera-Cary preserve the volume exactly (Higuera & Cary 2017, Sec. V); the
     curve is then the noise of the finite differences, about ``1e-10`` per step.
-    Vay changes it by ``J(u^{-1/2}) / J(u^{n-1/2})`` in a uniform field: a bounded
+    Vay changes it by ``J(u^0) / J(u^n)`` in a uniform field: a bounded
     change, not an accumulation. Logarithmic axis, values below the float64
     rounding unit drawn on the grey line.
 
@@ -1220,7 +1189,7 @@ def phase_error_map(
         result = read_result(directory, pusher)
         time = result["time"].values
         error = diagnostics.gyration_phase_error(
-            time, result["u_centered"].values, u0, b_vector, q, m
+            time, result["u"].values, u0, b_vector, q, m
         )
         per_turn = diagnostics.phase_error_per_turn(time, error, period)
         speeds.append(u_over_c[0])

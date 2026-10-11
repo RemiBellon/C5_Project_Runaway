@@ -222,8 +222,10 @@ class RunConfig(BaseModel):
         or a digit. This forbids path separators, ``..`` and hidden names, so the
         label can never point outside the results directory.
     pusher : {"boris", "vay", "higuera_cary", "rk4"}
-        Time-integration scheme. The three first are leapfrog pushers, ``"rk4"``
-        is the non-structure-preserving reference.
+        Time-integration scheme. The three first are second-order pushers built on
+        the same synchronized step (see ``pushers``); ``"rk4"`` is the fourth-order
+        witness that preserves no structure of the motion. All take and return
+        positions and velocities at the same time.
     dt : float
         Fixed time step [s], finite and strictly positive.
     n_steps : int

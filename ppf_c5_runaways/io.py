@@ -17,8 +17,11 @@ TIMESTAMP_FORMAT : str
     ``strftime`` format of the timestamp in a folder name: ``aaaammjj_hhmmss``
     (year, month, day, hour, minute, second).
 METADATA_SCHEMA_VERSION : int
-    Layout version of ``metadata.json``, to be increased when its keys change so
-    that a reader can tell which layout it is looking at.
+    Layout version of a results folder, written in ``metadata.json``. It is
+    increased when the keys of ``metadata.json`` or the variables of ``data.nc``
+    change, so that a reader can tell which layout it is looking at. Version 1
+    stored the velocities half a step before the positions (``u`` on ``time_half``,
+    plus ``u_centered``); version 2 stores ``u`` at the times of ``x``.
 """
 
 import importlib.metadata
@@ -41,7 +44,7 @@ CONFIG_FILENAME: Final[str] = "config.yaml"
 DATA_FILENAME: Final[str] = "data.nc"
 METADATA_FILENAME: Final[str] = "metadata.json"
 TIMESTAMP_FORMAT: Final[str] = "%Y%m%d_%H%M%S"
-METADATA_SCHEMA_VERSION: Final[int] = 1
+METADATA_SCHEMA_VERSION: Final[int] = 2
 
 
 def create_result_dir(
@@ -159,7 +162,6 @@ def write_result(
     u: NDArray[np.float64],
     dt: float,
     *,
-    u_centered: NDArray[np.float64],
     b_field: NDArray[np.float64],
     step_jacobian_determinant: NDArray[np.float64] | None = None,
 ) -> None:
@@ -173,11 +175,11 @@ def write_result(
     An existing group is **never overwritten**: a result that took hours to compute
     must not disappear silently. To recompute a pusher, use a new results folder.
 
-    The group holds four arrays, with their units and the time convention written
-    in the file (leapfrog convention of the project): ``x`` [m], ``u_centered``
-    [m/s] and ``b_field`` [T] at times ``time``, and ``u`` [m/s] at times
-    ``time_half = time - dt/2``. Diagnostics at the times ``time`` (energy, drift,
-    invariants) must use ``u_centered``, never ``u``: see ``integrate``.
+    The group holds three arrays, with their units and the time convention written
+    in the file: ``x`` [m], ``u`` [m/s] and ``b_field`` [T], all at the same times
+    ``time`` (synchronized convention of the project, see ``integrate``). Any
+    diagnostic at these times (energy, drift, invariants) uses ``x`` and ``u`` as
+    they are.
 
     Parameters
     ----------
@@ -190,17 +192,16 @@ def write_result(
     x : ndarray, shape (n_saved, n_part, 3)
         Positions [m].
     u : ndarray, shape (n_saved, n_part, 3)
-        Proper velocities [m/s], half a step before the positions.
+        Proper velocities ``u = gamma * v`` [m/s] at the times ``t``, as returned
+        by ``integrate``.
     dt : float
-        Time step [s], finite and strictly positive; it gives the times of ``u``.
-    u_centered : ndarray, shape (n_saved, n_part, 3)
-        Proper velocities [m/s] at the times of the positions,
-        ``u^n = (u^{n-1/2} + u^{n+1/2}) / 2``, as returned by ``integrate``.
-        Required, and given by name, so that no result is stored without it.
+        Time step of the run [s], finite and strictly positive. Stored as an
+        attribute of the group: the kept states can be further apart than ``dt``.
     b_field : ndarray, shape (n_saved, n_part, 3)
         Magnetic field [T] felt by each particle at the positions ``x`` and times
         ``t``. Stored so that diagnostics that need it (magnetic moment, gyration
-        phase) can be computed from the results folder alone.
+        phase) can be computed from the results folder alone. Required, and given
+        by name, so that no result is stored without it.
     step_jacobian_determinant : ndarray, shape (n_saved, n_part), optional
         Jacobian determinant of the step that starts at each saved state
         (``diagnostics.step_jacobian_determinant``), dimensionless. Stored only if
@@ -227,8 +228,7 @@ def write_result(
         )
     if not np.isfinite(dt) or dt <= 0.0:
         raise ValueError(f"dt must be a finite, strictly positive number, got {dt!r}")
-    t, x, u = np.asarray(t), np.asarray(x), np.asarray(u)
-    u_centered, b_field = np.asarray(u_centered), np.asarray(b_field)
+    t, x, u, b_field = np.asarray(t), np.asarray(x), np.asarray(u), np.asarray(b_field)
     if t.ndim != 1 or x.ndim != 3 or x.shape[0] != len(t) or x.shape[2] != 3:
         raise ValueError(
             "x must have shape (n_saved, n_part, 3) with n_saved = len(t); "
@@ -238,11 +238,6 @@ def write_result(
         raise ValueError(
             f"u must have the same shape as x; got x of shape {x.shape} and u of "
             f"shape {u.shape}"
-        )
-    if u_centered.shape != x.shape:
-        raise ValueError(
-            f"u_centered must have the same shape as x; got x of shape {x.shape} "
-            f"and u_centered of shape {u_centered.shape}"
         )
     if b_field.shape != x.shape:
         raise ValueError(
@@ -268,22 +263,17 @@ def write_result(
     dataset = xr.Dataset(
         data_vars={
             "x": (("time", "particle", "axis"), x, {"units": "m"}),
-            "u": (("time_half", "particle", "axis"), u, {"units": "m/s"}),
-            "u_centered": (("time", "particle", "axis"), u_centered, {"units": "m/s"}),
+            "u": (("time", "particle", "axis"), u, {"units": "m/s"}),
             "b_field": (("time", "particle", "axis"), b_field, {"units": "T"}),
         },
         coords={
             "time": ("time", t, {"units": "s"}),
-            "time_half": ("time_half", t - dt / 2.0, {"units": "s"}),
             "axis": ["x", "y", "z"],
         },
         attrs={
             "pusher": pusher_name,
             "dt": dt,
-            "convention": (
-                "x[i] and u_centered[i] = (u^(k-1/2) + u^(k+1/2))/2 are at time[i]; "
-                "u[i] = u^(k-1/2) is at time_half[i]"
-            ),
+            "convention": "x[i], u[i] and b_field[i] are all at time[i]",
         },
     )
     if step_jacobian_determinant is not None:
@@ -292,7 +282,7 @@ def write_result(
             step_jacobian_determinant,
             {
                 "units": "1",
-                "meaning": "determinant of the step (x^n, u^(n-1/2)) -> next",
+                "meaning": "determinant of the step (x^n, u^n) -> (x^n+1, u^n+1)",
             },
         )
     try:
@@ -316,20 +306,22 @@ def read_result(run_dir: str | Path, pusher_name: str) -> xr.Dataset:
     Returns
     -------
     xarray.Dataset
-        Fully loaded in memory (the file is closed). Variable ``x`` [m], dimensions
-        ``(time, particle, axis)``; variable ``u_centered`` [m/s], the velocity at
-        the same times, to use in diagnostics; variable ``b_field`` [T], the
-        magnetic field at the positions ``x``; variable ``u`` [m/s], dimensions
-        ``(time_half, particle, axis)``, the leapfrog state half a step earlier;
-        attributes ``pusher``, ``dt`` and ``convention``. Folders written before
-        ``u_centered`` or ``b_field`` existed do not have them.
+        Fully loaded in memory (the file is closed). Variables ``x`` [m], ``u``
+        [m/s] and ``b_field`` [T], all of dimensions ``(time, particle, axis)``: the
+        positions, the proper velocities and the magnetic field felt, at the same
+        times. Attributes ``pusher``, ``dt`` and ``convention``.
 
     Raises
     ------
     FileNotFoundError
         If there is no ``data.nc`` in ``run_dir``.
     ValueError
-        If the file has no group ``pusher_name``. The message lists those it has.
+        If the file has no group ``pusher_name`` (the message lists those it has),
+        or if this group has the layout of schema version 1, written by the code
+        that kept the velocities half a step before the positions. Such a result
+        is refused rather than read: its ``u`` is not at the times of its ``x``,
+        and every diagnostic would be wrong by an error of order ``dt`` without
+        any warning.
     """
     data_path = Path(run_dir) / DATA_FILENAME
     if not data_path.is_file():
@@ -343,4 +335,14 @@ def read_result(run_dir: str | Path, pusher_name: str) -> xr.Dataset:
             f"No result for pusher {pusher_name!r} in {data_path}. Available: {names}"
         )
     with xr.open_dataset(data_path, group=pusher_name, engine="h5netcdf") as dataset:
-        return dataset.load()
+        result = dataset.load()
+    # ``time_half`` is the time axis of the half-step velocities of schema version 1.
+    if "time_half" in result.dims:
+        raise ValueError(
+            f"The result of {pusher_name!r} in {data_path} was written with an older "
+            "version of the code (results layout 1): its velocities u are half a "
+            "time step before its positions x, which this version cannot use. Run "
+            "the case again to get a result in the current layout "
+            f"({METADATA_SCHEMA_VERSION})."
+        )
+    return result

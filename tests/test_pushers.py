@@ -204,12 +204,17 @@ def test_velocity_turns_by_the_boris_angle_in_the_right_sense(u_over_c, theta, q
 @pytest.mark.parametrize("theta", [0.05, 0.5], ids=["small_step", "large_step"])
 @pytest.mark.parametrize("u_over_c", REGIMES)
 def test_orbit_is_a_circle_of_the_radius_predicted_for_boris(u_over_c, theta):
-    # Independent truth (geometry, no fit): each step moves the particle by
-    # dt * v_perp, and the direction turns by theta_B = 2 arctan(theta / 2). The
-    # positions are the vertices of a regular polygon, on a circle of radius
-    #     R = (side / 2) / sin(theta_B / 2) = r_L sqrt(1 + (theta / 2)^2),
-    # (cf. Chin & Cator 2022, Eq. 3.5), whose centre is on the left of the first
-    # edge (counter-clockwise turn), at distance R cos(theta_B / 2) from its middle.
+    # Independent truth (geometry, no fit): each step turns the velocity by
+    # theta_B = 2 arctan(theta / 2) and moves the particle by the mean of the old
+    # and new velocities (Ripperda et al. 2018, Eq. 23), a vector of length
+    # dt v_perp cos(theta_B / 2) that turns by theta_B too. The positions are the
+    # vertices of a regular polygon, on a circle of radius
+    #     R = (side / 2) / sin(theta_B / 2) = dt v_perp / (2 tan(theta_B / 2))
+    #       = dt v_perp / theta = r_L,
+    # the exact Larmor radius: the synchronized Boris step puts the particle on the
+    # true circle, and only the phase along it is wrong. The centre is on the left
+    # of the first edge (counter-clockwise turn), at distance R cos(theta_B / 2)
+    # from its middle.
     # The motion along z must be uniform: z_n = n dt u_z / gamma.
     # Tolerance 1e-12 (relative): 300 steps of rounding, about 300 * 1e-16 = 3e-14,
     # with a margin of a factor 30.
@@ -217,7 +222,7 @@ def test_orbit_is_a_circle_of_the_radius_predicted_for_boris(u_over_c, theta):
     x, u = _state(u_over_c)
     dt = _dt_for_angle(theta, u)
     r_larmor = _larmor_radius(u)
-    radius = r_larmor * math.sqrt(1.0 + (theta / 2.0) ** 2)
+    radius = r_larmor
     theta_boris = 2.0 * math.atan(theta / 2.0)
     field = _uniform_b()
 
@@ -264,7 +269,7 @@ def test_electric_field_parallel_to_b_accelerates_linearly(push, u_over_c):
 
     _, u_end = _advance(push, x, u, field, 0.0, dt, n_steps)
 
-    # After n steps the half-step velocity has received n full kicks.
+    # After n steps the velocity has received n full kicks.
     assert u_end[0, 2] == pytest.approx(u[0, 2] + gain, rel=1e-12)
     if push is not vay:
         assert np.hypot(u_end[0, 0], u_end[0, 1]) == pytest.approx(
@@ -274,13 +279,14 @@ def test_electric_field_parallel_to_b_accelerates_linearly(push, u_over_c):
 
 @all_pushers
 @pytest.mark.physics
-def test_position_is_moved_with_the_new_velocity(
+def test_position_is_moved_with_the_mean_of_the_old_and_new_velocities(
     push,
 ):
     # Independent truth, done by hand. From rest (u = 0), a pure E field gives
     # u_new = q E dt / m (two half kicks). Choose it equal to 2c along z, so that
-    # gamma_new = sqrt(5). The move is then dt * u_new / gamma_new; using the old
-    # gamma (1) instead would give a result larger by sqrt(5).
+    # gamma_new = sqrt(5) and v_new = 2c / sqrt(5). The first half of the move is
+    # done at rest and the second at v_new: x_new = (dt / 2) v_new. Moving the whole
+    # step with v_new would give twice that.
     dt = 1.0e-12
     e_z = 2.0 * c * M / (Q * dt)
     field = fields.uniform(b_field=[0.0, 0.0, 0.0], e_field=[0.0, 0.0, e_z])
@@ -288,7 +294,25 @@ def test_position_is_moved_with_the_new_velocity(
     x_new, u_new = push(np.zeros((1, 3)), np.zeros((1, 3)), field, 0.0, dt, Q, M)
 
     assert u_new[0, 2] == pytest.approx(2.0 * c, rel=1e-14)
-    assert x_new[0, 2] == pytest.approx(dt * 2.0 * c / math.sqrt(5.0), rel=1e-14)
+    assert x_new[0, 2] == pytest.approx(0.5 * dt * 2.0 * c / math.sqrt(5.0), rel=1e-14)
+
+
+@all_pushers
+@pytest.mark.physics
+@pytest.mark.parametrize("u_over_c", REGIMES)
+def test_displacement_is_dt_times_the_mean_velocity_in_any_field(push, u_over_c):
+    # Independent truth: Ripperda et al. 2018, Eq. 23. Whatever the field, the two
+    # half moves add up to x_new - x = (dt / 2) (v_old + v_new), with v = u / gamma.
+    # The field here depends on the position and on the time, and x starts at the
+    # origin so that the displacement is known without cancellation.
+    # Tolerance 1e-15 (relative): the sum of two half moves, a few roundings.
+    _, u = _state(u_over_c)
+    dt = _dt_for_angle(0.3, u)
+
+    x_new, u_new = push(np.zeros((1, 3)), u, _wavy_field, 2.0e-11, dt, Q, M)
+
+    expected = 0.5 * dt * (_velocity(u) + _velocity(u_new))
+    np.testing.assert_allclose(x_new, expected, rtol=1e-15, atol=0.0)
 
 
 @all_pushers
@@ -331,43 +355,43 @@ def test_free_particle_moves_in_a_straight_line(push, u_over_c):
     ids=["uniform", "non_uniform_time_dependent"],
 )
 @pytest.mark.parametrize("u_over_c", REGIMES)
-def test_running_backward_from_the_paired_state_gives_back_the_start(
-    push, u_over_c, field, tolerance
-):
+def test_running_backward_gives_back_the_start(push, u_over_c, field, tolerance):
     # Independent truth: the scheme is time symmetric (see the Notes of ``boris``).
-    # Forward: (x^0, u^-1/2) -> ... -> (x^N, u^N-1/2), then one more step for
-    # u^N+1/2. Backward, with -dt and the time going down from t_N, starting from
-    # (x^N, u^N+1/2): after N steps we must find x^0 and u^{+1/2}.
+    # Forward N steps from (x^0, u^0), then N steps with -dt and the time going down
+    # from t_N, starting from the state reached: we must find (x^0, u^0) again.
     n_steps = 200
-    x0, u_back = _state(u_over_c)
-    dt = _dt_for_angle(0.05, u_back)
-    r_larmor = _larmor_radius(u_back)
-    _, u_half = push(x0, u_back, field, 0.0, dt, Q, M)  # u^{+1/2}
+    x0, u0 = _state(u_over_c)
+    dt = _dt_for_angle(0.05, u0)
+    r_larmor = _larmor_radius(u0)
 
-    x_n, u_n_minus = _advance(push, x0, u_back, field, 0.0, dt, n_steps)
-    _, u_n_plus = push(x_n, u_n_minus, field, n_steps * dt, dt, Q, M)
-    x_end, u_end = _advance(push, x_n, u_n_plus, field, n_steps * dt, -dt, n_steps)
+    x_n, u_n = _advance(push, x0, u0, field, 0.0, dt, n_steps)
+    x_end, u_end = _advance(push, x_n, u_n, field, n_steps * dt, -dt, n_steps)
 
     assert np.max(np.abs(x_end - x0)) < tolerance * r_larmor
     np.testing.assert_allclose(
-        u_end, u_half, rtol=tolerance, atol=tolerance * np.linalg.norm(u_half)
+        u_end, u0, rtol=tolerance, atol=tolerance * np.linalg.norm(u0)
     )
 
 
-def test_running_backward_from_the_unpaired_state_does_not_give_back_the_start():
-    # Documents why the test above pairs the states: calling boris with -dt on
-    # (x^N, u^N-1/2) accelerates before moving, so the position comes back wrong,
-    # by about 5 % of the Larmor radius at theta = 0.05 (30 times that at least is
-    # well above rounding). This guards the warning written in the docstring.
-    n_steps = 200
-    x0, u_back = _state(math.sqrt(3.0))
-    dt = _dt_for_angle(0.05, u_back)
-    field = _uniform_b()
+@all_pushers
+@pytest.mark.physics
+@pytest.mark.parametrize("u_over_c", REGIMES)
+def test_one_step_forward_then_backward_gives_back_the_start(push, u_over_c):
+    # Roadmap A11. Independent truth: time symmetry of the step, in uniform E and B.
+    # One step +dt, then one step -dt from the state reached. Criterion of the
+    # roadmap: back to 1e-13, here relative to |u| for the velocity and to the
+    # length of the step for the position (x starts at the origin).
+    _, u0 = _state(u_over_c)
+    x0 = np.zeros((1, 3))
+    dt = _dt_for_angle(0.1, u0)
+    field = fields.uniform(b_field=[0.3, -0.2, BZ], e_field=[1.0e5, -2.0e5, 3.0e5])
+    step_length = dt * np.linalg.norm(_velocity(u0))
 
-    x_n, u_n_minus = _advance(boris, x0, u_back, field, 0.0, dt, n_steps)
-    x_end, _ = _advance(boris, x_n, u_n_minus, field, n_steps * dt, -dt, n_steps)
+    x_1, u_1 = push(x0, u0, field, 0.0, dt, Q, M)
+    x_end, u_end = push(x_1, u_1, field, dt, -dt, Q, M)
 
-    assert np.max(np.abs(x_end - x0)) > 1e-2 * _larmor_radius(u_back)
+    assert np.linalg.norm(x_end - x0) < 1e-13 * step_length
+    assert np.linalg.norm(u_end - u0) < 1e-13 * np.linalg.norm(u0)
 
 
 # --- order of convergence -------------------------------------------------------
@@ -378,29 +402,33 @@ def test_running_backward_from_the_unpaired_state_does_not_give_back_the_start()
 @pytest.mark.physics
 @pytest.mark.parametrize("u_over_c", REGIMES)
 def test_gyration_error_decreases_as_dt_squared(push, u_over_c):
-    # Independent truth: the exact helix (``_exact_helix``). Two gyro-periods,
-    # refined 100 -> 800 steps. The start is the exact u at -dt/2 (leapfrog
-    # convention). The scheme is second order: slope of log(error) against log(dt)
-    # must be 2 within 0.1 (a first-order error, or a wrong rotation angle, would
-    # give another slope). The error is far above rounding (1e-6 against 1e-16).
+    # Independent truth: the exact helix (``_exact_helix``). 2.25 gyro-periods,
+    # refined 100 -> 800 steps, from the exact state (x0, u0) at t = 0. The duration
+    # is not a whole number of periods on purpose: over whole turns the moves add up
+    # to zero and a velocity half a step off would not show. Position and
+    # velocity are compared with the exact ones at the same final time, as they
+    # come out of the pusher: no half step, no averaging. The scheme is second
+    # order: the slope of log(error) against log(dt) must be 2 within 0.1, for x
+    # and for u (a field taken at the wrong point, or a velocity half a step off,
+    # would give slope 1). The errors are far above rounding (1e-6 against 1e-16).
     x0, u0 = _state(u_over_c)
     omega = abs(Q) * BZ / (M * _gamma(u0)[0])
-    duration = 2.0 * 2.0 * math.pi / omega
+    duration = 2.25 * 2.0 * math.pi / omega
     r_larmor = _larmor_radius(u0)
     field = _uniform_b()
     step_counts = [100, 200, 400, 800]
+    x_exact, u_exact = _exact_helix(x0, u0, Q, M, BZ, duration)
 
-    errors = []
+    x_errors, u_errors = [], []
     for n_steps in step_counts:
         dt = duration / n_steps
-        _, u_start = _exact_helix(x0, u0, Q, M, BZ, -dt / 2.0)
-        x_end, _ = _advance(push, x0, u_start, field, 0.0, dt, n_steps)
-        x_exact, _ = _exact_helix(x0, u0, Q, M, BZ, duration)
-        errors.append(np.linalg.norm(x_end - x_exact) / r_larmor)
+        x_end, u_end = _advance(push, x0, u0, field, 0.0, dt, n_steps)
+        x_errors.append(np.linalg.norm(x_end - x_exact) / r_larmor)
+        u_errors.append(np.linalg.norm(u_end - u_exact) / np.linalg.norm(u0))
 
-    dts = duration / np.array(step_counts)
-    slope = np.polyfit(np.log(dts), np.log(errors), 1)[0]
-    assert slope == pytest.approx(2.0, abs=0.1)
+    log_dts = np.log(duration / np.array(step_counts))
+    assert np.polyfit(log_dts, np.log(x_errors), 1)[0] == pytest.approx(2.0, abs=0.1)
+    assert np.polyfit(log_dts, np.log(u_errors), 1)[0] == pytest.approx(2.0, abs=0.1)
 
 
 @all_pushers
@@ -410,9 +438,9 @@ def test_gyration_error_decreases_as_dt_squared(push, u_over_c):
 def test_relativistic_acceleration_error_decreases_as_dt_squared(push, u_over_c):
     # Independent truth: hyperbolic motion in a uniform E field, B = 0. With
     # u(t) = u0 + a t (exact), z(t) = (c^2 / a) (gamma(t) - gamma(0)). The start is
-    # the exact u at -dt/2. This test detects a wrong gamma in the position update:
-    # using gamma^{n-1/2} instead of gamma^{n+1/2} makes the scheme first order.
-    # Slope of the error against dt must be 2 within 0.1.
+    # the exact state at t = 0. This test detects a wrong gamma in the position
+    # update: moving the whole step with the old or the new velocity alone makes
+    # the scheme first order. Slope of the error against dt must be 2 within 0.1.
     duration = 1.0e-9  # [s]
     u0 = u_over_c * c
     accel = (u0 + c) / duration  # du/dt [m/s^2]
@@ -427,7 +455,7 @@ def test_relativistic_acceleration_error_decreases_as_dt_squared(push, u_over_c)
     errors = []
     for n_steps in step_counts:
         dt = duration / n_steps
-        u_start = np.array([[0.0, 0.0, u0 - accel * dt / 2.0]])
+        u_start = np.array([[0.0, 0.0, u0]])
         x_end, _ = _advance(push, np.zeros((1, 3)), u_start, field, 0.0, dt, n_steps)
         errors.append(abs(x_end[0, 2] - z_exact) / (c * duration))
 
@@ -531,9 +559,12 @@ def test_particles_do_not_influence_each_other(
 
 
 @all_pushers
-def test_field_is_called_once_with_the_positions_and_the_time(
+def test_field_is_called_once_at_the_middle_of_the_step(
     push,
 ):
+    # Independent truth: the definition of the synchronized step (Ripperda et al.
+    # 2018, Eqs. 6-7): the field is taken at x^{n+1/2} = x + (dt / 2) u / gamma and
+    # at t + dt / 2, computed here by hand. The two particles have different speeds.
     calls = []
 
     def recording_field(x, t):
@@ -541,12 +572,15 @@ def test_field_is_called_once_with_the_positions_and_the_time(
         return np.zeros_like(x), np.zeros_like(x)
 
     x = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    u = np.array([[0.0, 3.0 * c, 4.0 * c], [c, 0.0, 0.0]])
+    gamma = np.array([[math.sqrt(26.0)], [math.sqrt(2.0)]])
+    t, dt = 7.5e-9, 1.0e-9
 
-    push(x, np.zeros((2, 3)), recording_field, 7.5e-9, 1.0e-12, Q, M)
+    push(x, u, recording_field, t, dt, Q, M)
 
     assert len(calls) == 1
-    np.testing.assert_array_equal(calls[0][0], x)  # x^n, not the new positions
-    assert calls[0][1] == 7.5e-9
+    np.testing.assert_allclose(calls[0][0], x + 0.5 * dt * u / gamma, rtol=1e-15)
+    assert calls[0][1] == pytest.approx(t + 0.5 * dt, rel=1e-15)
 
 
 @all_pushers
@@ -772,10 +806,10 @@ def test_boris_does_not_keep_the_relativistic_exb_drift(kappa):
 def _step_jacobian_determinant(push, u, field, dt):
     """Determinant of ``d u_new / d u`` for one step, by central differences.
 
-    In a uniform field the position does not enter the update of ``u``, and the move
-    ``x_new = x + dt u_new / gamma`` is a shear (determinant 1): the Jacobian of the
-    whole step in ``(x, u)`` is block triangular, so its determinant is that of the
-    3 x 3 matrix ``d u_new / d u`` computed here.
+    In a uniform field the position does not enter the update of ``u``, and each of
+    the two half moves ``x + (dt / 2) u / gamma`` is a shear (determinant 1): the
+    Jacobian of the whole step in ``(x, u)`` is block triangular, so its determinant
+    is that of the 3 x 3 matrix ``d u_new / d u`` computed here.
     """
     h = 1.0e-5 * c  # step of the differences [m/s]
     jacobian = np.zeros((3, 3))

@@ -131,30 +131,35 @@ def test_run_each_pusher_stores_its_own_orbit(tmp_path, pusher):
 def test_run_stores_the_velocity_at_the_times_of_the_positions(tmp_path, pusher):
     # Independent truth: the exact velocity of the gyrating electron,
     # u_x = u_perp cos(omega t), u_y = u_perp sin(omega t) (an electron turns
-    # counter-clockwise about +z), u_z constant. The stored u_centered is the velocity
-    # at the times of x: its error is of order theta^2 (observed 1.5e-4 to 4.3e-4 of
-    # |u| for theta = 2 pi / 200), below the tolerance theta^2 |u| = 1e-3 |u|. The
-    # half-step u, compared at the same times, is off by about
-    # theta / 2 * u_perp = 1.3e-2 |u| (observed 1.3e-2):
-    # checking that it fails the same tolerance proves the test can tell them apart.
+    # counter-clockwise about +z), u_z constant. The stored u is the velocity at the
+    # times of x: its error is of order theta^2 (observed 1.2e-4 to 4.1e-4 of |u|),
+    # below the tolerance theta^2 |u| = 1e-3 |u| for theta = 2 pi / 200. A velocity stored half a step
+    # early would be off by about theta / 2 * u_perp = 1.3e-2 |u|: checking that the
+    # exact velocity at t - dt / 2 fails the same tolerance proves that the test can
+    # tell the two apart.
     config = _config(pusher=pusher)
 
     result_dir = run.pusher(_write_yaml(tmp_path, config), base_dir=tmp_path)
 
     result = read_result(result_dir, pusher)
-    angle = OMEGA * result["time"].values
-    u_exact = np.zeros((angle.size, 3))
-    u_exact[:, 0] = 0.8 * SPEED * np.cos(angle)
-    u_exact[:, 1] = 0.8 * SPEED * np.sin(angle)
-    u_exact[:, 2] = 0.6 * SPEED
-    theta = OMEGA * config.dt
-    tolerance = theta**2 * SPEED
-    error_centered = np.linalg.norm(
-        result["u_centered"].values[:, 0] - u_exact, axis=-1
+
+    def exact_velocity(time):
+        u_exact = np.zeros((time.size, 3))
+        u_exact[:, 0] = 0.8 * SPEED * np.cos(OMEGA * time)
+        u_exact[:, 1] = 0.8 * SPEED * np.sin(OMEGA * time)
+        u_exact[:, 2] = 0.6 * SPEED
+        return u_exact
+
+    time = result["time"].values
+    u_stored = result["u"].values[:, 0]
+    tolerance = (OMEGA * config.dt) ** 2 * SPEED
+    error = np.linalg.norm(u_stored - exact_velocity(time), axis=-1)
+    error_if_half_a_step_early = np.linalg.norm(
+        u_stored - exact_velocity(time - config.dt / 2.0), axis=-1
     )
-    error_half = np.linalg.norm(result["u"].values[:, 0] - u_exact, axis=-1)
-    assert np.max(error_centered) < tolerance
-    assert np.max(error_half) > 10.0 * tolerance
+    assert result["u"].dims == result["x"].dims == ("time", "particle", "axis")
+    assert np.max(error) < tolerance
+    assert np.max(error_if_half_a_step_early[1:]) > 10.0 * tolerance
 
 
 def test_run_puts_the_three_pushers_in_the_same_folder_to_compare_them(tmp_path):

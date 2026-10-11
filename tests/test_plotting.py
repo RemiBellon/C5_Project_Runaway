@@ -48,7 +48,6 @@ def result_dir(tmp_path):
         x,
         velocity,
         1e-12,
-        u_centered=velocity,
         b_field=velocity,
     )
     return directory, x
@@ -244,7 +243,6 @@ def three_pushers_dir(result_dir):
             scale * x,
             velocity,
             1e-12,
-            u_centered=velocity,
             b_field=velocity,
         )
     return directory, x
@@ -338,7 +336,7 @@ def energy_dir(result_dir):
     ):
         u = np.zeros((3, 1, 3))
         u[:, 0, 0] = np.array(u_over_c) * c
-        write_result(energy_directory, name, t, x, u, 1e-12, u_centered=u, b_field=u)
+        write_result(energy_directory, name, t, x, u, 1e-12, b_field=u)
     return energy_directory
 
 
@@ -376,8 +374,9 @@ def test_energy_error_is_saved_as_a_png_and_a_pdf(energy_dir, tmp_path):
     assert (tmp_path / "energy.pdf").is_file()
 
 
-def test_energy_error_of_a_result_without_u_centered_says_to_run_again(tmp_path):
-    # A folder written before u_centered was stored: only x and u in the group.
+def test_energy_error_of_a_result_in_the_old_layout_says_to_run_again(tmp_path):
+    # A folder written by the older code: u on its own time axis, half a step before
+    # x. ``io.read_result`` refuses it, and the figure passes the message on.
     directory = tmp_path / "old"
     directory.mkdir()
     old = xr.Dataset(
@@ -389,7 +388,7 @@ def test_energy_error_of_a_result_without_u_centered_says_to_run_again(tmp_path)
     )
     old.to_netcdf(directory / "data.nc", group="boris", engine="h5netcdf")
 
-    with pytest.raises(ValueError, match=r"no u_centered.*Run it again"):
+    with pytest.raises(ValueError, match=r"older version.*Run the case again"):
         plotting.energy_error(directory, show=False)
 
 
@@ -427,7 +426,7 @@ def _drift_dir(base, name, u_over_c, factors):
         x = np.zeros((11, 1, 3))
         x[:, 0, :] = factor * v_drift * t[:, np.newaxis]
         u = np.ones_like(x)
-        write_result(directory, pusher, t, x, u, 1.0e-12, u_centered=u, b_field=u)
+        write_result(directory, pusher, t, x, u, 1.0e-12, b_field=u)
     return directory
 
 
@@ -505,9 +504,7 @@ def test_phase_error_draws_a_known_lag(tmp_path):
     u = np.zeros((t.size, 1, 3))
     u[:, 0, 0] = speed * np.sin(angle)  # rotation of (0, -speed, 0) by +angle
     u[:, 0, 1] = -speed * np.cos(angle)
-    write_result(
-        directory, "boris", t, np.zeros_like(u), u, 1e-12, u_centered=u, b_field=u
-    )
+    write_result(directory, "boris", t, np.zeros_like(u), u, 1e-12, b_field=u)
 
     figure = plotting.phase_error(directory, show=False)
 
@@ -517,17 +514,14 @@ def test_phase_error_draws_a_known_lag(tmp_path):
     np.testing.assert_allclose(
         lines["particle 0"].get_ydata(), lag, rtol=0.0, atol=1e-10
     )
-    # The prediction for "boris" with the dt of the configuration (1e-12 s):
-    # offset arctan(theta / 2) - 2 arctan(theta / 4), then 2 arctan(theta / 2) -
-    # theta per step (Zenitani & Umeda 2018, Eq. 12), written out here. Tolerance
-    # 1e-12 relative: the figure computes the angle as 2 arctan(|beta| / gamma), in
-    # another order, so the rounding differs by a few eps per step, times up to 90
-    # steps (observed 3e-14).
+    # The prediction for "boris" with the dt of the configuration (1e-12 s): no
+    # error at t = 0, then 2 arctan(theta / 2) - theta per step (Zenitani & Umeda
+    # 2018, Eq. 12), written out here. Tolerance 1e-12 relative: the figure
+    # computes the angle as 2 arctan(|beta| / gamma), in another order, so the
+    # rounding differs by a few eps per step, times up to 90 steps.
     theta = rate * 1.0e-12
     steps = np.round(t / 1.0e-12)
-    expected = (math.atan(theta / 2.0) - 2.0 * math.atan(theta / 4.0)) + steps * (
-        2.0 * math.atan(theta / 2.0) - theta
-    )
+    expected = steps * (2.0 * math.atan(theta / 2.0) - theta)
     np.testing.assert_allclose(
         lines["prediction"].get_ydata(), expected, rtol=1e-12, atol=0.0
     )
@@ -561,7 +555,7 @@ def test_mirror_trajectory_draws_z_over_l_and_the_predicted_mirror_points(tmp_pa
     x[:, 0, 2] = [0.0, 5.0, 10.0, 5.0, 0.0]
     b_field = np.zeros_like(x)
     b_field[:, 0, 2] = 2.5
-    write_result(directory, "boris", t, x, x, 1e-12, u_centered=x, b_field=b_field)
+    write_result(directory, "boris", t, x, x, 1e-12, b_field=b_field)
 
     figure = plotting.mirror_trajectory(directory, show=False)
 
@@ -574,11 +568,12 @@ def test_mirror_trajectory_draws_z_over_l_and_the_predicted_mirror_points(tmp_pa
     np.testing.assert_allclose(sorted(dashed), [-1.0, 1.0], rtol=1e-12)
 
 
-def test_magnetic_moment_error_uses_the_half_step_velocity_by_default(tmp_path):
-    # Independent truth: mu = m u_perp^2 / (2 |B|). The half-step velocities keep
-    # u_perp and B fixed except at the second time, where u_perp^2 is 10 % larger:
-    # errors eps (drawn on the rounding line), 0.1, eps. u_centered is made
-    # different on purpose, so that using it would give other numbers.
+def test_magnetic_moment_error_draws_the_known_changes_of_mu(tmp_path):
+    # Independent truth: mu = m u_perp^2 / (2 |B|), by hand. At the second time
+    # u_perp^2 is 10 % larger with the same field: mu is 10 % larger. At the third
+    # time u_perp is back to its first value and the field is doubled: mu is
+    # halved. Errors: eps (the exact 0, drawn on the rounding line), 0.1, 0.5, at
+    # the times of the stored states. The parallel velocity must not enter.
     directory = _folder(
         tmp_path,
         "mu",
@@ -588,25 +583,18 @@ def test_magnetic_moment_error_uses_the_half_step_velocity_by_default(tmp_path):
     t = 1.0e-9 * np.arange(3)
     u = np.zeros((3, 1, 3))
     u[:, 0, 0] = 1.0e7 * np.sqrt([1.0, 1.1, 1.0])
-    u[:, 0, 2] = 5.0e6
+    u[:, 0, 2] = [5.0e6, 6.0e6, 7.0e6]
     b_field = np.zeros_like(u)
-    b_field[:, 0, 2] = 2.5
-    write_result(
-        directory,
-        "boris",
-        t,
-        np.zeros_like(u),
-        u,
-        1e-12,
-        u_centered=2 * u,
-        b_field=b_field,
-    )
+    b_field[:, 0, 2] = [2.5, 2.5, 5.0]
+    write_result(directory, "boris", t, np.zeros_like(u), u, 1e-12, b_field=b_field)
 
     figure = plotting.magnetic_moment_error(directory, show=False)
 
     (line, _) = _named_lines(figure.axes[0])  # the particle, then the rounding line
     rounding = np.finfo(np.float64).eps
-    np.testing.assert_allclose(line.get_ydata(), [rounding, 0.1, rounding], rtol=1e-12)
+    np.testing.assert_allclose(line.get_ydata(), [rounding, 0.1, 0.5], rtol=1e-12)
+    np.testing.assert_array_equal(line.get_xdata(), t)
+    assert figure.axes[0].get_title() == "Magnetic moment"
 
 
 def test_phase_space_volume_is_the_product_of_the_step_determinants(tmp_path):
@@ -628,7 +616,6 @@ def test_phase_space_volume_is_the_product_of_the_step_determinants(tmp_path):
         u,
         u,
         1.0e-12,
-        u_centered=u,
         b_field=u,
         step_jacobian_determinant=determinants,
     )
@@ -648,19 +635,10 @@ def test_phase_space_volume_needs_the_stored_determinants(result_dir):
         plotting.phase_space_volume(directory, show=False)
 
 
-def test_energy_error_from_the_half_step_velocity_uses_its_own_times(energy_dir):
-    figure = plotting.energy_error(energy_dir, pusher="boris", velocity="u", show=False)
-
-    (line, _) = _named_lines(figure.axes[0])
-    np.testing.assert_allclose(
-        line.get_xdata(), 1.0e-11 * np.arange(3) - 0.5e-12, rtol=1e-12
-    )
-
-
 def _phase_scan_folder(tmp_path, name, gamma, pitches_degrees, drifts_per_turn):
     """A made-up folder: electrons of one gamma, several pitch angles, in B = 2.5 z.
 
-    The stored u_centered turns at the exact rate plus ``drifts_per_turn[i]`` rad
+    The stored u turns at the exact rate plus ``drifts_per_turn[i]`` rad
     per exact turn, so the phase error per turn of particle i is known exactly.
     """
     b_z = 2.5
@@ -693,7 +671,6 @@ def _phase_scan_folder(tmp_path, name, gamma, pitches_degrees, drifts_per_turn):
         np.zeros_like(u),
         u,
         1e-12,
-        u_centered=u,
         b_field=u,
     )
     return directory, rate

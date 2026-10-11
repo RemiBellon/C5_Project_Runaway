@@ -81,7 +81,7 @@ def pusher(
             f"The field kind {config.field.kind!r} has no field function yet. "
             "Available: 'uniform_cartesian', 'mirror', 'tokamak'."
         )
-    t, x, u, u_centered = integrate(
+    t, x, u = integrate(
         x0=np.array(config.initial.x0),
         u0=np.array(config.initial.u0),
         field=field,
@@ -97,7 +97,7 @@ def pusher(
     b_field = np.empty_like(x)
     for k in range(t.size):
         _, b_field[k] = field(x[k], t[k])
-    # Determinant of the step that starts at each saved state (x^n, u^{n-1/2}).
+    # Determinant of the step that starts at each saved state (x^n, u^n).
     step_determinant = None
     if phase_space_volume:
         step_determinant = step_jacobian_determinant(
@@ -115,7 +115,6 @@ def pusher(
             x,
             u,
             config.dt,
-            u_centered=u_centered,
             b_field=b_field,
             step_jacobian_determinant=step_determinant,
         )

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import xarray as xr
 from pydantic import ValidationError
 
 import ppf_c5_runaways.io as results_io
@@ -85,7 +86,7 @@ def test_metadata_content(tmp_path):
     metadata = json.loads((run_dir / METADATA_FILENAME).read_text("utf-8"))
 
     assert metadata == {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": "uniform_b_20260920_223005",
         "name": "uniform_b",
         "created_at": "2026-09-20T22:30:05+02:00",
@@ -204,15 +205,14 @@ def _trajectories(seed: int = 0):
         "x": rng.normal(size=(4, 2, 3)),
         "u": rng.normal(size=(4, 2, 3)),
         "dt": 1.0e-12,
-        "u_centered": rng.normal(size=(4, 2, 3)),
         "b_field": rng.normal(size=(4, 2, 3)),
     }
 
 
 def test_written_trajectories_are_read_back_exactly(tmp_path):
     # Independent truth: the arrays given to write_result. Exact equality, since
-    # netCDF stores float64 without loss. The time of u is the time of x minus dt/2;
-    # u_centered is at the time of x.
+    # netCDF stores float64 without loss. x, u and b_field are all at the same
+    # times: the file holds no other velocity and no other time axis.
     run_dir = create_result_dir(tmp_path, _config(), now=_NOW)
     written = _trajectories()
 
@@ -221,19 +221,16 @@ def test_written_trajectories_are_read_back_exactly(tmp_path):
 
     np.testing.assert_array_equal(result["x"].values, written["x"])
     np.testing.assert_array_equal(result["u"].values, written["u"])
-    np.testing.assert_array_equal(result["u_centered"].values, written["u_centered"])
     np.testing.assert_array_equal(result["b_field"].values, written["b_field"])
     np.testing.assert_array_equal(result["time"].values, written["t"])
-    np.testing.assert_allclose(
-        result["time_half"].values, written["t"] - 0.5e-12, rtol=1e-15
-    )
-    assert result["x"].dims == ("time", "particle", "axis")
-    assert result["u_centered"].dims == ("time", "particle", "axis")
-    assert result["u"].dims == ("time_half", "particle", "axis")
-    assert result["b_field"].dims == ("time", "particle", "axis")
-    assert result["u_centered"].attrs["units"] == "m/s"
+    assert set(result.data_vars) == {"x", "u", "b_field"}
+    assert set(result.coords) == {"time", "axis"}
+    for name in ("x", "u", "b_field"):
+        assert result[name].dims == ("time", "particle", "axis")
+    assert result["x"].attrs["units"] == "m"
+    assert result["u"].attrs["units"] == "m/s"
     assert result["b_field"].attrs["units"] == "T"
-    assert "u_centered" in result.attrs["convention"]
+    assert result.attrs["convention"] == "x[i], u[i] and b_field[i] are all at time[i]"
     assert result.attrs["pusher"] == "boris"
     assert result.attrs["dt"] == written["dt"]
 
@@ -253,9 +250,7 @@ def test_a_second_pusher_is_added_to_the_same_folder_without_touching_the_first(
     for name, written in (("boris", boris), ("vay", vay)):
         result = read_result(run_dir, name)
         np.testing.assert_array_equal(result["x"].values, written["x"])
-        np.testing.assert_array_equal(
-            result["u_centered"].values, written["u_centered"]
-        )
+        np.testing.assert_array_equal(result["u"].values, written["u"])
 
 
 def test_an_existing_result_is_never_overwritten(tmp_path):
@@ -271,16 +266,15 @@ def test_an_existing_result_is_never_overwritten(tmp_path):
     )
 
 
-@pytest.mark.parametrize("name", ["u_centered", "b_field"])
-def test_u_centered_and_b_field_are_required(tmp_path, name):
-    # A result without the velocity at whole steps, or without the field felt by the
-    # particle, could not be diagnosed correctly later: writing one must be
+def test_b_field_is_required(tmp_path):
+    # A result without the field felt by the particle could not be diagnosed
+    # correctly later (magnetic moment, gyration phase): writing one must be
     # impossible, not merely discouraged.
     run_dir = create_result_dir(tmp_path, _config(), now=_NOW)
     arguments = _trajectories()
-    del arguments[name]
+    del arguments["b_field"]
 
-    with pytest.raises(TypeError, match=name):
+    with pytest.raises(TypeError, match="b_field"):
         write_result(run_dir, "boris", **arguments)
 
     assert not (run_dir / DATA_FILENAME).exists()
@@ -301,6 +295,36 @@ def test_reading_a_folder_without_data_says_so(tmp_path):
         read_result(run_dir, "boris")
 
 
+def test_a_result_in_the_old_layout_is_refused_and_the_others_are_still_read(
+    tmp_path,
+):
+    # Independent truth: the layout written by the code before the synchronized
+    # convention, rebuilt here by hand: u on its own axis ``time_half``, half a step
+    # before x, plus u_centered on ``time``. Reading it as a current result would
+    # pair x with a velocity half a step off, silently. It must be refused, with a
+    # message that says what to do. A current result added to the same file (what
+    # ``run.pusher(..., result_dir=...)`` does) must still be read.
+    run_dir = create_result_dir(tmp_path, _config(), now=_NOW)
+    time = np.array([0.0, 1.0e-12])
+    old = xr.Dataset(
+        data_vars={
+            "x": (("time", "particle", "axis"), np.zeros((2, 1, 3))),
+            "u": (("time_half", "particle", "axis"), np.ones((2, 1, 3))),
+            "u_centered": (("time", "particle", "axis"), np.ones((2, 1, 3))),
+        },
+        coords={"time": time, "time_half": time - 0.5e-12},
+        attrs={"pusher": "boris", "dt": 1.0e-12},
+    )
+    old.to_netcdf(run_dir / DATA_FILENAME, group="boris", engine="h5netcdf")
+    written = _trajectories()
+    write_result(run_dir, "vay", **written)
+
+    with pytest.raises(ValueError, match=r"'boris'.*older version.*Run the case again"):
+        read_result(run_dir, "boris")
+
+    np.testing.assert_array_equal(read_result(run_dir, "vay")["u"].values, written["u"])
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [
@@ -308,7 +332,6 @@ def test_reading_a_folder_without_data_says_so(tmp_path):
         ({"dt": 0.0}, "dt must be"),
         ({"x": np.zeros((4, 3))}, "x must have shape"),
         ({"u": np.zeros((4, 1, 3))}, "u must have the same shape"),
-        ({"u_centered": np.zeros((4, 1, 3))}, "u_centered must have the same shape"),
         ({"b_field": np.zeros((4, 1, 3))}, "b_field must have the same shape"),
     ],
 )

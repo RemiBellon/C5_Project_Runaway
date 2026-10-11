@@ -23,20 +23,11 @@ def energy_error(u: NDArray[np.float64]) -> NDArray[np.float64]:
     Parameters
     ----------
     u : ndarray, shape (n_saved, n_part, 3)
-        Proper velocities ``u = gamma * v`` [m/s], one set per saved state.
-
-        * ``u_centered`` (velocity at whole steps, ``(u^{n-1/2} + u^{n+1/2}) / 2``)
-          whenever the energy is compared with something at the times of the
-          positions, for example with an electric field. The half-step velocities
-          would add an error of order ``dt``.
-        * ``u`` (the leapfrog state ``u^{n-1/2}``) to measure the conservation of
-          the scheme itself in a static magnetic field without electric field, as
-          Ripperda et al. (2018, Figs. 3 and 11) do: ``K`` is then constant, the
-          time label does not matter, and Boris and Higuera-Cary keep
-          ``|u^{n-1/2}|`` exactly. The average ``u_centered`` of two vectors of the
-          same norm is shorter by a factor ``cos(alpha / 2)`` (``alpha`` the angle
-          turned in one step): in a non-uniform field it varies along the orbit,
-          a second-order effect of the averaging, not of the scheme.
+        Proper velocities ``u = gamma * v`` [m/s], one set per saved state: ``u``
+        of ``integrate`` or of the results files, which is the velocity at the
+        times of the positions. In a pure magnetic field Boris and Higuera-Cary
+        keep ``|u|`` exactly, so the error measured is rounding only, as in
+        Ripperda et al. (2018, Figs. 3 and 11).
 
     Returns
     -------
@@ -148,11 +139,9 @@ def gyration_phase(
     Parameters
     ----------
     u : ndarray, shape (n_saved, n_part, 3)
-        Proper velocities [m/s]. Use ``u_centered``: in a uniform magnetic field
-        ``u^{n-1/2}`` and ``u^{n+1/2}`` have the same parallel part and
-        perpendicular parts of the same norm (exactly for Boris and Higuera-Cary,
-        to rounding for Vay), so the phase of their average is exactly the mean of
-        their phases: the phase at the time of the positions.
+        Proper velocities [m/s], one set per saved state: ``u`` of ``integrate`` or
+        of the results files. The phase is that of the particle at the times of
+        these states.
     b_direction : array_like, shape (3,)
         Direction of the (uniform) magnetic field, any non-zero length.
 
@@ -223,10 +212,12 @@ def gyration_phase_error(
     t : ndarray, shape (n_saved,)
         Times [s] of the velocities ``u``.
     u : ndarray, shape (n_saved, n_part, 3)
-        Proper velocities [m/s] at the times ``t``: ``u_centered``.
+        Proper velocities [m/s] at the times ``t``: ``u`` of ``integrate`` or of
+        the results files.
     u0 : ndarray, shape (n_part, 3)
-        Exact initial proper velocities [m/s] at ``t = 0`` (those of the
-        configuration, not the first saved state of the scheme).
+        Exact initial proper velocities [m/s] at ``t = 0``, those of the
+        configuration. They are also the first saved state, so the error is zero
+        at ``t = 0``.
     b_field : array_like, shape (3,)
         The uniform magnetic field [T].
     q, m : float
@@ -392,19 +383,16 @@ def predicted_gyration_phase_error(
 ) -> NDArray[np.float64]:
     """Phase error that ``gyration_phase_error`` must find for a scheme, exactly.
 
-    In a uniform ``B`` without ``E``, with the initialisation of ``integrate`` (half
-    a step backward with the same scheme) and the recentred ``u_centered``, the
-    phase error at step ``n`` is, with ``alpha(h)`` the angle of the scheme for a
-    step ``h`` (``rotation_angle_per_step``) and ``theta`` the exact angle per step:
+    In a uniform ``B`` without ``E``, for the velocities ``u^n`` kept by
+    ``integrate`` (at the times ``t^n = n dt``, starting from ``u^0 = u0``), the
+    phase error at step ``n`` is, with ``alpha`` the angle of the scheme for one step
+    ``dt`` (``rotation_angle_per_step``) and ``theta`` the exact angle per step:
 
-        e_n = [alpha(dt) / 2 - alpha(dt / 2)] + n [alpha(dt) - theta]
+        e_n = n (alpha - theta)
 
-    Derivation: ``u^{-1/2}`` is ``u0`` turned by ``-alpha(dt / 2)``; each step turns
-    by ``alpha(dt)``; ``u_centered^n`` is at mid-angle between ``u^{n-1/2}`` and
-    ``u^{n+1/2}``, so its phase is ``phase(u0) - alpha(dt / 2) + (n + 1/2) alpha``;
-    the exact phase is ``phase(u0) + n theta``. The first term is a constant
-    offset of order ``theta^3`` (``-theta^3 / 32`` for Boris); the second is the
-    secular drift.
+    Derivation: each step turns ``u`` by ``alpha``, so the phase of ``u^n`` is
+    ``phase(u0) + n alpha``; the exact phase is ``phase(u0) + n theta``. The error
+    is zero at ``t = 0`` and grows linearly: a pure secular drift, with no offset.
 
     Parameters
     ----------
@@ -435,13 +423,11 @@ def predicted_gyration_phase_error(
         raise ValueError(f"dt must be strictly positive, got {dt!r}")
     u0 = np.asarray(u0, dtype=np.float64)
     step_angle = rotation_angle_per_step(scheme, u0, b_field, dt, q, m)
-    half_step_angle = rotation_angle_per_step(scheme, u0, b_field, dt / 2.0, q, m)
     gamma0 = np.sqrt(1.0 + np.sum(u0**2, axis=1) / c**2)
     exact_angle = -q * np.linalg.norm(b_field) * dt / (gamma0 * m)
 
     steps = np.round(np.asarray(t, dtype=np.float64) / dt)[:, np.newaxis]
-    offset = step_angle / 2.0 - half_step_angle
-    return offset + steps * (step_angle - exact_angle)
+    return steps * (step_angle - exact_angle)
 
 
 def pitch_angle(
@@ -490,10 +476,11 @@ def phase_error_per_turn(
 ) -> NDArray[np.float64]:
     """Secular gyration phase error per exact turn, by a least-squares fit.
 
-    The phase error of a scheme in a uniform field is a constant offset plus a
-    drift linear in time (``predicted_gyration_phase_error``). The slope of the
-    straight line fitted to all the saved points, times the exact period, is the
-    drift per turn; the offset does not enter it.
+    The phase error of a scheme in a uniform field is a drift linear in time, zero
+    at ``t = 0`` (``predicted_gyration_phase_error``). The slope of the straight
+    line fitted to all the saved points, times the exact period, is the drift per
+    turn. The line is fitted with a free constant, so a constant offset in
+    ``phase_error``, whatever its origin, does not enter the result.
 
     Parameters
     ----------
@@ -549,13 +536,12 @@ def magnetic_moment(
     Parameters
     ----------
     u : ndarray, shape (n_saved, n_part, 3)
-        Proper velocities [m/s]. In a static magnetic field, prefer the leapfrog
-        state ``u^{n-1/2}``: the average ``u_centered`` of two vectors turned by an
-        angle ``alpha`` has its perpendicular part shortened by ``cos(alpha / 2)``,
-        an artefact that varies with ``|B|`` (``alpha`` is proportional to it).
+        Proper velocities [m/s], one set per saved state: ``u`` of ``integrate`` or
+        of the results files.
     b_field : ndarray, shape (n_saved, n_part, 3)
-        Magnetic field [T] at the positions of the particles, at the same times
-        (``b_field`` of the results files).
+        Magnetic field [T] at the positions of the particles, at the same times as
+        ``u`` (``b_field`` of the results files). ``u`` and the positions are known
+        at the same times, so ``mu`` is that of the particle at these times.
     m : float
         Rest mass [kg], strictly positive.
 
@@ -610,14 +596,17 @@ def step_jacobian_determinant(
 ) -> NDArray[np.float64]:
     """Measure the Jacobian determinant of one step of ``push`` at each given state.
 
-    The step maps ``(x^n, u^{n-1/2})`` to ``(x^{n+1}, u^{n+1/2})``. Its Jacobian
-    determinant is the factor by which it changes phase-space volumes: exactly 1 for
-    Boris and Higuera-Cary, ``J(u^{n-1/2}) / J(u^{n+1/2})`` for Vay with
+    The step maps ``(x^n, u^n)`` to ``(x^{n+1}, u^{n+1})``. Its Jacobian determinant
+    is the factor by which it changes phase-space volumes: exactly 1 for Boris and
+    Higuera-Cary, ``J(u^n) / J(u^{n+1})`` for Vay with
     ``J(u) = 1 + (|beta|^2 + (beta . u / c)^2) / gamma(u)^4`` and
-    ``beta = q B(x^n) dt / (2 m)`` (Higuera & Cary 2017, Sec. V, Eqs. 38-41). The
-    determinant is measured here by central differences, without using these
-    formulas, so that they can be checked. The product of the determinants of all
-    the steps of a run is the volume change of the whole run.
+    ``beta = q B(x^{n+1/2}) dt / (2 m)``, the field being taken at the middle of the
+    step (Higuera & Cary 2017, Sec. V, Eqs. 38-41). The two half moves of the step
+    are shears, of determinant 1, so they do not change these values. The
+    determinant is measured here by central differences on the whole 6 x 6
+    Jacobian, without using these formulas, so that they can be checked. The
+    product of the determinants of all the steps of a run is the volume change of
+    the whole run.
 
     Parameters
     ----------
@@ -630,8 +619,8 @@ def step_jacobian_determinant(
     x : ndarray, shape (n_saved, n_part, 3)
         Positions ``x^n`` [m].
     u : ndarray, shape (n_saved, n_part, 3)
-        Leapfrog velocities ``u^{n-1/2}`` [m/s] (``u`` of the results files, not
-        ``u_centered``: the step acts on the leapfrog state).
+        Proper velocities ``u^n`` [m/s] at the same times (``u`` of the results
+        files).
     dt, q, m : float
         Time step [s], signed charge [C] and mass [kg] of the run.
     relative_shift : float, optional
@@ -651,8 +640,9 @@ def step_jacobian_determinant(
 
     Notes
     -----
-    The field is evaluated by ``push`` at ``(x, t)``, so any field works, uniform or
-    not. The cost is one call to ``push`` with ``12 n_part`` particles per state.
+    The field is evaluated by ``push`` itself, at the middle of each step, so any
+    field works, uniform or not. The cost is one call to ``push`` with
+    ``12 n_part`` particles per state.
     """
     t = np.asarray(t, dtype=np.float64)
     x = np.asarray(x, dtype=np.float64)
