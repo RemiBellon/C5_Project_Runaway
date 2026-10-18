@@ -420,7 +420,11 @@ def orbit_3d(
                     label=label,
                 )
                 axes.plot(
-                    [x[0, i, 0]], [x[0, i, 1]], [x[0, i, 2]], "o", color=line.get_color()
+                    [x[0, i, 0]],
+                    [x[0, i, 1]],
+                    [x[0, i, 2]],
+                    "o",
+                    color=line.get_color(),
                 )
         theta = np.linspace(0,2*np.pi,100)
         axes.plot(r0_mm*np.cos(theta),r0_mm*np.sin(theta),'--')
@@ -639,11 +643,11 @@ def drift_error(
         ``E`` perpendicular to ``B`` and ``|E| < c |B|`` (no E x B drift then), or if
         a pusher is not in a folder.
     """
-    result_dirs = [Path(directory) for directory in result_dirs]
-    if not result_dirs:
+    folders = [Path(directory) for directory in result_dirs]
+    if not folders:
         raise ValueError("result_dirs is empty: give at least one results folder")
     if pusher is None:
-        names = list_results(result_dirs[0])
+        names = list_results(folders[0])
     elif isinstance(pusher, str):
         names = [pusher]
     else:
@@ -651,7 +655,7 @@ def drift_error(
 
     # For each pusher, the points (u_E / c, relative drift error) of every folder.
     points: dict[str, list[tuple[float, float]]] = {name: [] for name in names}
-    for directory in result_dirs:
+    for directory in folders:
         field = config.load_config(directory / CONFIG_FILENAME).field
         if field.kind != "uniform_cartesian":
             raise ValueError(
@@ -794,7 +798,7 @@ def phase_error(
 
     with plt.rc_context(figure_style()):
         figure, axes = plt.subplots()
-        prediction_label = "prediction"
+        prediction_label: str | None = "prediction"
         for k, (name, result) in enumerate(results.items()):
             time = result["time"].values
             error = diagnostics.gyration_phase_error(
@@ -1010,7 +1014,7 @@ def phase_space_volume(
     determinant of step ``k`` measured during the run (``run.pusher(...,
     phase_space_volume=True)``, which needs ``save_every: 1``). Boris and
     Higuera-Cary preserve the volume exactly (Higuera & Cary 2017, Sec. V); the
-    curve is then the noise of the finite differences, about ``1e-10`` per step.
+    curve is then the noise of the finite differences, about ``2e-10`` per step.
     Vay changes it by ``J(u^0) / J(u^n)`` in a uniform field: a bounded
     change, not an accumulation. Logarithmic axis, values below the float64
     rounding unit drawn on the grey line.
@@ -1145,12 +1149,15 @@ def phase_error_map(
         uniform ``B`` without ``E``, its particles do not share one Lorentz factor,
         or the folders do not hold the same pitch angles.
     """
-    result_dirs = [Path(directory) for directory in result_dirs]
-    if len(result_dirs) < 2:
+    folders = [Path(directory) for directory in result_dirs]
+    if len(folders) < 2:
         raise ValueError("a map needs at least two results folders (two gammas)")
 
-    speeds, pitches, measured, predicted = [], None, [], []
-    for directory in result_dirs:
+    speed_values: list[float] = []
+    measured_rows: list[NDArray[np.float64]] = []
+    predicted: list[NDArray[np.float64]] = []
+    pitches: NDArray[np.float64] | None = None
+    for directory in folders:
         run_config = config.load_config(directory / CONFIG_FILENAME)
         field = run_config.field
         if (
@@ -1192,18 +1199,20 @@ def phase_error_map(
             time, result["u"].values, u0, b_vector, q, m
         )
         per_turn = diagnostics.phase_error_per_turn(time, error, period)
-        speeds.append(u_over_c[0])
-        measured.append(per_turn / boris_lag_per_turn)
+        speed_values.append(u_over_c[0])
+        measured_rows.append(per_turn / boris_lag_per_turn)
         if pusher in ("boris", "vay", "higuera_cary"):
             angle = diagnostics.rotation_angle_per_step(pusher, u0, b_vector, dt, q, m)
             exact = np.sign(-q) * theta
             predicted.append(2.0 * np.pi / theta * (angle - exact) / boris_lag_per_turn)
 
-    order = np.argsort(speeds)
-    speeds = np.array(speeds)[order]
-    measured = np.array(measured)[order]  # (n_gamma, n_pitch)
+    # Set by the first folder: there are at least two, checked above.
+    assert pitches is not None
+    order = np.argsort(speed_values)
+    speeds = np.array(speed_values)[order]
+    measured = np.array(measured_rows)[order]  # (n_gamma, n_pitch)
     # Lag is negative for an electron (Omega > 0); make "lag" negative for any sign.
-    sign = np.sign(-config.load_config(result_dirs[0] / CONFIG_FILENAME).q)
+    sign = np.sign(-config.load_config(folders[0] / CONFIG_FILENAME).q)
     measured = sign * measured
 
     with plt.rc_context(figure_style()):

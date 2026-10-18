@@ -8,7 +8,7 @@ Further objectives will consist in add synchrotron radiations effects then if ti
 The code mostly consists in tests, comparison and validation of numerical and physical results in different physical cases.
 
 > For now the project is named `ppf_c5_runaways`. To replace it :
-> `src/ppf_c5_runaways/`, `packages = ["src/ppf_c5_runaways"]` et `name = "ppf_c5_runaways"` dans `pyproject.toml`.
+> `ppf_c5_runaways/`, `packages = ["ppf_c5_runaways"]` et `name = "ppf_c5_runaways"` dans `pyproject.toml`.
 
 ---
 
@@ -99,7 +99,7 @@ results/
 
 ## 3. Code architecture
 ```
-src/ppf_c5_runaways/
+ppf_c5_runaways/
 ├── constants.py     Physical constants SI
 ├── config.py        pydantic scheme for .yaml (ensure config file will be readable by the code)
 ├── fields.py        Analytics E(x,t), B(x,t)

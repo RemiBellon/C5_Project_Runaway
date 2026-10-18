@@ -126,6 +126,71 @@ def magnetic_mirror(*, b0: float, length: float) -> Field:
 
     return field
 
+
+def magnetic_gradient(*, b0: float, length: float) -> Field:
+    """Build the static field with a perpendicular gradient of Ripperda et al. (2018).
+
+    ``B(x, y, z) = B0 (1 + x / L) z_hat`` and ``E = 0`` (Eq. 63 of the paper).
+
+    The field keeps the direction ``z`` everywhere and its strength grows linearly
+    with ``x``: ``grad |B| = (B0 / L) x_hat`` for ``x > -L``, perpendicular to the
+    field. ``div B = 0`` exactly, since ``B_z`` does not depend on ``z``. The field
+    is not curl-free (``curl B = -(B0 / L) y_hat``): it is a test field, not a
+    vacuum field. It is the simplest field in which what a particle feels depends
+    on where the field is evaluated, which a uniform field cannot show.
+
+    Parameters
+    ----------
+    b0 : float
+        Field on the plane ``x = 0`` [T], finite and strictly positive.
+    length : float
+        Gradient length ``L`` [m], finite and strictly positive: the field doubles
+        between ``x = 0`` and ``x = L``.
+
+    Returns
+    -------
+    Field
+        ``field(x, t) -> (E, B)``, both of shape ``(n_part, 3)``; ``t`` is unused.
+
+    Raises
+    ------
+    ValueError
+        If ``b0`` or ``length`` is not a finite, strictly positive number.
+
+    Notes
+    -----
+    The field vanishes on the plane ``x = -L`` and points along ``-z`` beyond it.
+    The gyration and the drift formulas of the paper assume ``x > -L``; keeping
+    the particles on that side is left to the caller.
+    """
+    for name, value in (("b0", b0), ("length", length)):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not np.isfinite(value)
+            or value <= 0.0
+        ):
+            raise ValueError(
+                f"{name} must be a finite, strictly positive number, got {value!r}"
+            )
+
+    def field(
+        x: NDArray[np.float64], t: float
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Return ``(E, B)``, each of shape ``(n_part, 3)``, for positions ``x``."""
+        x = np.asarray(x, dtype=np.float64)
+        if x.ndim != 2 or x.shape[1] != 3:
+            raise ValueError(
+                "x must have shape (n_part, 3), one row per particle; "
+                f"got shape {x.shape}. For a single particle use shape (1, 3), "
+                "for example x[np.newaxis, :]."
+            )
+        b_field = np.zeros_like(x)
+        b_field[:, 2] = b0 * (1.0 + x[:, 0] / length)
+        return np.zeros_like(x), b_field
+
+    return field
+
 """
 def custom_toroidal(*, b0: float, r0: float, b_r: str, b_theta: str, b_phi: str) -> Field:
     context = {"b0": b0, "r0": r0, "cos": np.cos, "sin": np.sin, "sqrt": np.sqrt}

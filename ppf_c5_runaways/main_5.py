@@ -1,3 +1,5 @@
+"""Gyration phase error per turn against u / c and the pitch angle, uniform B."""
+
 import math
 from pathlib import Path
 
@@ -28,7 +30,11 @@ for index, u_over_c in enumerate(proper_speeds):
         if not config_path.exists():  # new_config never overwrites a file
             new_config(
                 name,
-                field={"kind": "uniform_cartesian", "b_field": [0, 0, b_z], "e_field": [0, 0, 0]},
+                field={
+                    "kind": "uniform_cartesian",
+                    "b_field": [0, 0, b_z],
+                    "e_field": [0, 0, 0],
+                },
                 u0=u0,
                 dt=2.0 * math.pi / omega / steps_per_turn,
                 n_steps=n_turns * steps_per_turn,

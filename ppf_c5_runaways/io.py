@@ -21,7 +21,9 @@ METADATA_SCHEMA_VERSION : int
     increased when the keys of ``metadata.json`` or the variables of ``data.nc``
     change, so that a reader can tell which layout it is looking at. Version 1
     stored the velocities half a step before the positions (``u`` on ``time_half``,
-    plus ``u_centered``); version 2 stores ``u`` at the times of ``x``.
+    plus ``u_centered``); version 2 stores ``u`` at the times of ``x``; version 3
+    adds to ``metadata.json`` the git state of the code (``git``) and the SciPy
+    version, with the same ``data.nc``.
 """
 
 import importlib.metadata
@@ -29,6 +31,7 @@ import json
 import platform
 import re
 import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Final
@@ -44,7 +47,51 @@ CONFIG_FILENAME: Final[str] = "config.yaml"
 DATA_FILENAME: Final[str] = "data.nc"
 METADATA_FILENAME: Final[str] = "metadata.json"
 TIMESTAMP_FORMAT: Final[str] = "%Y%m%d_%H%M%S"
-METADATA_SCHEMA_VERSION: Final[int] = 2
+METADATA_SCHEMA_VERSION: Final[int] = 3
+
+
+def _git_revision(directory: Path) -> dict[str, str | bool] | None:
+    """Commit of the git repository that holds ``directory``, and whether it is dirty.
+
+    Parameters
+    ----------
+    directory : pathlib.Path
+        A directory inside the repository, for example that of the package.
+
+    Returns
+    -------
+    dict or None
+        ``{"commit": <40-character hash of HEAD>, "dirty": <bool>}``. ``dirty`` is
+        True when the working tree differs from that commit: a tracked file is
+        modified, staged or deleted, or a file that is not ignored is untracked.
+        None when the commit cannot be known: ``directory`` is not inside a git
+        repository, the repository has no commit yet, or git is not installed.
+
+    Notes
+    -----
+    The hash alone does not identify the code that ran when the working tree is
+    dirty; ``dirty`` says so, it does not say what differs.
+    """
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    return {"commit": head.stdout.strip(), "dirty": status.stdout != ""}
 
 
 def create_result_dir(
@@ -55,12 +102,16 @@ def create_result_dir(
     The folder is ``<base_dir>/<config.name>_<aaaammjj_hhmmss>`` and contains::
 
         config.yaml     the run configuration, as read back by ``load_config``
-        metadata.json   run_id, name, created_at, seed, versions, schema_version
+        metadata.json   run_id, name, created_at, seed, git, versions,
+                        schema_version
 
     metadata.json is meant to be light: everything about what was computed
     (``pusher``, ``dt``, ``n_steps``...) stays in config.yaml and is not
     duplicated. The seed is repeated in it on purpose, so that the random stream of
-    a run can be recovered from the metadata alone.
+    a run can be recovered from the metadata alone. ``git`` is the commit of the
+    repository that holds the package and whether its working tree differed from
+    it (``_git_revision``), or null when it cannot be known; the run is not
+    stopped for it.
 
     The folder is created exclusively: it is never reused or overwritten. If any
     step fails, the folder is removed again, so a folder that exists is complete.
@@ -111,10 +162,12 @@ def create_result_dir(
         "name": config.name,
         "created_at": now.isoformat(),
         "seed": config.seed,
+        "git": _git_revision(Path(__file__).parent),
         "versions": {
             "ppf_c5_runaways": importlib.metadata.version("ppf_c5_runaways"),
             "python": platform.python_version(),
             "numpy": np.__version__,
+            "scipy": importlib.metadata.version("scipy"),
         },
     }
 

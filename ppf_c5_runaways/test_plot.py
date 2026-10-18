@@ -9,8 +9,8 @@ from matplotlib.figure import Figure
 from matplotlib.rcsetup import cycler
 from matplotlib.typing import RcKeyType
 
-from ppf_c5_runaways.io import list_results, read_result
 import ppf_c5_runaways.run as run
+from ppf_c5_runaways.io import list_results, read_result
 
 # Lengths are computed in metres, and shown in millimetres because a Larmor radius in
 # a tokamak is of that order. The conversion is done here, at the edge, only to draw.
@@ -158,7 +158,7 @@ def orbit_xy(
         If a pusher is not in the folder. The message lists those it has.
     """
     if pusher is None:
- 
+
 
         names = list_results(result_dir)
         if not names:
@@ -170,7 +170,7 @@ def orbit_xy(
 
         names = [pusher]
     else:
-  
+
         names = list(pusher)
     results = {name: read_result(result_dir, name) for name in names}
 
@@ -369,17 +369,17 @@ def orbit_3D(
         names = [pusher]
     else:
         names = list(pusher)
-    results = {name: read_result(result_dir, name) for name in names}    
+    results = {name: read_result(result_dir, name) for name in names}
     # Size, fonts and layout come from the common style; the layout is done by
     # constrained_layout, so there is no figure.tight_layout() here.
     with plt.rc_context(figure_style()):
-    
+
             figure, axes = plt.subplots()
             for k, (name, result) in enumerate(results.items()):
                 x = result["x"].values * _METRES_TO_MILLIMETRES  # (n_saved, n_part, 3)
-    
+
                 print(result["x"].shape)
-    
+
                 n_part = x.shape[1]
                 for i in range(n_part):
                     if len(results) == 1:
@@ -394,10 +394,12 @@ def orbit_3D(
                         linestyle=_LINE_STYLES[k % len(_LINE_STYLES)],
                         label=label,
                     )
-                    axes.plot3D(x[0, i, 0], x[0, i, 1], x[0, i, 2], "o", color=line.get_color())
+                    axes.plot3D(
+                        x[0, i, 0], x[0, i, 1], x[0, i, 2], "o", color=line.get_color()
+                    )
             axes.set_xlabel("x [mm]")
             axes.set_ylabel("y [mm]")
-            dt = next(iter(results.values())).attrs["dt"]  # the same for the whole folder
+            dt = next(iter(results.values())).attrs["dt"]  # same for the folder
             if len(results) == 1:
                 title = f"Orbit seen from above, pusher {names[0]!r}, dt = {dt:.3g} s"
             else:
@@ -406,7 +408,7 @@ def orbit_3D(
             axes.set_aspect("equal")  # a circle must look like a circle
             if len(axes.get_legend_handles_labels()[0]) > 1:
                 axes.legend()
-    
+
     if save_path is not None:
             save_figure(figure, save_path)
     if show:
@@ -415,7 +417,7 @@ def orbit_3D(
 
 
 
-    
+
 
 result_dir = run.pusher("configs/uniform_b_and_e_boris.yaml")
 #result_dir = run.pusher("configs/uniform_b_vay.yaml")

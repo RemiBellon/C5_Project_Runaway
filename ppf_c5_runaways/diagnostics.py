@@ -5,9 +5,11 @@ returned by ``integrate`` or read back by ``io.read_result``, and returns arrays
 """
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
+from scipy.integrate import quad
+from scipy.special import kv
 
-from ppf_c5_runaways.constants import c
+from ppf_c5_runaways.constants import c, eps_0
 from ppf_c5_runaways.fields import Field
 from ppf_c5_runaways.pushers import Pusher
 
@@ -66,6 +68,58 @@ def energy_error(u: NDArray[np.float64]) -> NDArray[np.float64]:
             "energy is 0, so a relative energy change has no meaning"
         )
     return (gamma_minus_one - gamma_minus_one[0]) / gamma_minus_one[0]
+
+
+def kinetic_energy(u: NDArray[np.float64], m: float) -> NDArray[np.float64]:
+    """Kinetic energy ``(gamma - 1) m c^2`` of each particle, without cancellation.
+
+    Computed as ``m c^2 (|u| / c)^2 / (gamma + 1)``, which is the same number
+    written without the subtraction ``gamma - 1``: from
+    ``gamma^2 - 1 = (|u| / c)^2`` one gets
+    ``gamma - 1 = (|u| / c)^2 / (gamma + 1)``. The direct form loses its digits in
+    the non-relativistic regime, and all of them below ``|u| / c = 1e-8``, where
+    ``sqrt(1 + 1e-16)`` rounds to exactly 1. This form keeps full precision from a
+    particle at rest to the ultra-relativistic regime.
+
+    Parameters
+    ----------
+    u : ndarray, shape (..., 3)
+        Proper velocities ``u = gamma * v`` [m/s]. Any leading shape: ``(3,)`` for
+        one particle, ``(n_part, 3)``, or ``(n_saved, n_part, 3)``.
+    m : float
+        Rest mass [kg], finite and strictly positive.
+
+    Returns
+    -------
+    ndarray, shape (...)
+        Kinetic energy [J], the shape of ``u`` without its last axis. Divide by
+        ``constants.e`` for electron-volts.
+
+    Raises
+    ------
+    ValueError
+        If the last axis of ``u`` does not have length 3, or ``m`` is not a finite,
+        strictly positive number.
+    """
+    u = np.asarray(u, dtype=np.float64)
+    if u.ndim == 0 or u.shape[-1] != 3:
+        raise ValueError(
+            "u must have shape (..., 3), the last axis holding the 3 components; "
+            f"got shape {u.shape}"
+        )
+    if (
+        isinstance(m, bool)
+        or not isinstance(m, (int, float))
+        or not np.isfinite(m)
+        or m <= 0.0
+    ):
+        raise ValueError(
+            f"m must be a finite, strictly positive number [kg], got {m!r}"
+        )
+
+    u_over_c_squared = np.sum(u**2, axis=-1) / c**2
+    gamma = np.sqrt(1.0 + u_over_c_squared)
+    return m * c**2 * u_over_c_squared / (gamma + 1.0)
 
 
 def drift_velocity(
@@ -435,7 +489,11 @@ def pitch_angle(
 ) -> NDArray[np.float64]:
     """Pitch angle of each velocity: angle between ``u`` and the field, in ``[0, pi]``.
 
-    ``psi = arccos(u . b_hat / |u|)``: 0 along ``B``, ``pi / 2`` perpendicular to it.
+    ``psi = arctan(u_perp / u_par)``, taken in ``[0, pi]``: 0 along ``B``,
+    ``pi / 2`` perpendicular to it, ``pi`` against it (Carbajal et al. 2017, Sec. II).
+    It is computed as ``atan2(|u x b_hat|, u . b_hat)``, which is accurate at every
+    angle. The equivalent ``arccos(u . b_hat / |u|)`` is not: near 0 and ``pi`` the
+    cosine is flat, so an angle of ``1e-8`` rad is returned as exactly 0.
 
     Parameters
     ----------
@@ -465,8 +523,10 @@ def pitch_angle(
     b_norm = np.linalg.norm(b_field)
     if b_norm == 0.0 or np.any(speed == 0.0):
         raise ValueError("u and b_field must be non-zero to define a pitch angle")
-    cosine = (u @ b_field) / (speed * b_norm)
-    return np.arccos(np.clip(cosine, -1.0, 1.0))  # clip: rounding may give 1 + eps
+    b_hat = b_field / b_norm
+    u_parallel = u @ b_hat
+    u_perpendicular = np.linalg.norm(np.cross(u, b_hat), axis=1)
+    return np.arctan2(u_perpendicular, u_parallel)
 
 
 def phase_error_per_turn(
@@ -592,7 +652,7 @@ def step_jacobian_determinant(
     q: float,
     m: float,
     *,
-    relative_shift: float = 1.0e-6,
+    relative_shift: float = 1.0e-5,
 ) -> NDArray[np.float64]:
     """Measure the Jacobian determinant of one step of ``push`` at each given state.
 
@@ -625,8 +685,11 @@ def step_jacobian_determinant(
         Time step [s], signed charge [C] and mass [kg] of the run.
     relative_shift : float, optional
         Size of the differences, relative to ``max(|x|, |v| dt)`` for a position
-        and to ``|u|`` for a velocity. Default ``1e-6``: truncation error about
-        ``1e-12`` and rounding error about ``eps / 1e-6 = 2e-10`` on each entry.
+        and to ``|u|`` for a velocity. Default ``1e-5``, close to the optimum
+        ``eps^(1/3) = 6e-6`` of central differences, where the truncation error
+        (about ``1e-10``) and the rounding error (about ``eps / 1e-5 = 2e-11`` on
+        each entry) balance: the determinant is then known to about ``2e-10``. With
+        ``1e-6`` the rounding dominates and the error reaches ``3e-9``.
 
     Returns
     -------
@@ -674,10 +737,10 @@ def step_jacobian_determinant(
         # n_part rows by -shift.
         shifted = np.tile(state, (12, 1))
         for j in range(6):
-            plus = slice(2 * j * n_part, (2 * j + 1) * n_part)
-            minus = slice((2 * j + 1) * n_part, (2 * j + 2) * n_part)
-            shifted[plus, j] += shift[:, j]
-            shifted[minus, j] -= shift[:, j]
+            rows_plus = slice(2 * j * n_part, (2 * j + 1) * n_part)
+            rows_minus = slice((2 * j + 1) * n_part, (2 * j + 2) * n_part)
+            shifted[rows_plus, j] += shift[:, j]
+            shifted[rows_minus, j] -= shift[:, j]
         x_new, u_new = push(shifted[:, :3], shifted[:, 3:], field, t[k], dt, q, m)
         pushed = np.concatenate([x_new, u_new], axis=1)  # (12 n_part, 6)
 
@@ -691,3 +754,379 @@ def step_jacobian_determinant(
             jacobian[:, :, j] = (plus - minus) / (2.0 * shift)
         determinants[k] = np.linalg.det(jacobian)
     return determinants
+
+
+def boost_proper_velocity(
+    u: NDArray[np.float64], frame_velocity: ArrayLike
+) -> NDArray[np.float64]:
+    """Proper velocities seen from a frame moving at a constant velocity.
+
+    Lorentz transformation of ``u = gamma * v`` from the frame of the simulation
+    to a frame that moves at ``frame_velocity`` with respect to it. With ``V`` the
+    frame velocity, ``n`` its direction and ``kappa = 1 / sqrt(1 - |V|^2 / c^2)``
+    its Lorentz factor, the part of ``u`` along ``n`` and the Lorentz factor of the
+    particle become
+
+        u_par' = kappa (u_par - gamma |V|),    gamma' = kappa (gamma - V . u / c^2),
+
+    and the part of ``u`` perpendicular to ``n`` does not change. This is the
+    transformation of the four-vector ``(gamma c, u)``; written for the velocity
+    ``v`` it gives Eqs. 53-56 of Ripperda et al. (2018).
+
+    Parameters
+    ----------
+    u : ndarray, shape (..., 3)
+        Proper velocities [m/s] in the frame of the simulation. Any leading shape:
+        ``(3,)``, ``(n_part, 3)`` or ``(n_saved, n_part, 3)``.
+    frame_velocity : array_like, shape (3,)
+        Velocity ``V`` [m/s] of the new frame, slower than light. It is a
+        velocity, not a proper velocity. For the frame of the E x B drift it is
+        ``E x B / |B|^2``.
+
+    Returns
+    -------
+    ndarray, shape (..., 3)
+        Proper velocities ``u'`` [m/s] in the moving frame, along the same axes.
+        The Lorentz factor there is ``sqrt(1 + |u'|^2 / c^2)``.
+
+    Raises
+    ------
+    ValueError
+        If the shapes are wrong, or ``frame_velocity`` is not finite or not slower
+        than light.
+
+    Notes
+    -----
+    For a particle that moves almost with the frame, ``u_par`` and ``gamma |V|``
+    are two numbers of size ``kappa c`` that nearly cancel, and the result is
+    multiplied by ``kappa``: the rounding error on ``u'`` is of order
+    ``kappa^2 eps c``. It is negligible at ``kappa = 10`` (``2e-14 c``) and grows
+    as ``kappa^2`` beyond.
+    """
+    u = np.asarray(u, dtype=np.float64)
+    frame_velocity = np.asarray(frame_velocity, dtype=np.float64)
+    if u.ndim == 0 or u.shape[-1] != 3 or frame_velocity.shape != (3,):
+        raise ValueError(
+            "u must have shape (..., 3) and frame_velocity shape (3,); got "
+            f"{u.shape} and {frame_velocity.shape}"
+        )
+    frame_speed = np.linalg.norm(frame_velocity)
+    if not np.isfinite(frame_speed) or frame_speed >= c:
+        raise ValueError(
+            "frame_velocity must be finite and slower than light, got a speed of "
+            f"{frame_speed!r} m/s"
+        )
+    if frame_speed == 0.0:
+        return u.copy()
+
+    direction = frame_velocity / frame_speed
+    kappa = 1.0 / np.sqrt(1.0 - (frame_speed / c) ** 2)
+    gamma = np.sqrt(1.0 + np.sum(u**2, axis=-1) / c**2)
+    u_parallel = u @ direction
+    # u_par' - u_par, added along the direction of the frame velocity.
+    change = (kappa - 1.0) * u_parallel - kappa * gamma * frame_speed
+    return u + change[..., np.newaxis] * direction
+
+
+def curvature(
+    u: NDArray[np.float64],
+    e_field: ArrayLike,
+    b_field: ArrayLike,
+    q: float,
+    m: float,
+) -> NDArray[np.float64]:
+    """Instantaneous curvature of the orbit of each particle, from the Lorentz force.
+
+    The curvature of a path of velocity ``v`` and acceleration ``a`` is
+    ``kappa = |v x a| / |v|^3`` (Carbajal et al. 2017, Eq. 13); its inverse is the
+    radius of the circle that follows the path locally. With the acceleration of
+    the Lorentz force, ``a = (q / (gamma m)) (E + v x B - v (v . E) / c^2)``, whose
+    last term is along ``v`` and drops out of the cross product:
+
+        kappa = |q| |v x (E + v x B)| / (gamma m |v|^3)
+
+    Without electric field this is ``|q| |B| sin(theta) / (gamma m |v|)``, with
+    ``theta`` the pitch angle (Eq. 14 of the paper). It is computed here from the
+    proper velocity, as ``|q| |u x (gamma E + u x B)| / (m |u|^3)``, which is the
+    same number and never forms ``v``.
+
+    Parameters
+    ----------
+    u : ndarray, shape (..., 3)
+        Proper velocities ``u = gamma * v`` [m/s], non-zero. Any leading shape:
+        ``(3,)``, ``(n_part, 3)`` or ``(n_saved, n_part, 3)``.
+    e_field, b_field : array_like, shape (..., 3)
+        Electric field [V/m] and magnetic field [T] at the position of each
+        particle, at the time of ``u``. Any shape that broadcasts with ``u``, for
+        example ``(3,)`` for uniform fields.
+    q : float
+        Signed charge [C]; only its absolute value matters here.
+    m : float
+        Rest mass [kg], finite and strictly positive.
+
+    Returns
+    -------
+    ndarray, shape (...)
+        Curvature [1/m], positive or zero, the shape of ``u`` without its last
+        axis. It is zero when the force is along the velocity or vanishes.
+
+    Raises
+    ------
+    ValueError
+        If a last axis does not have length 3, a velocity is zero (a particle at
+        rest has no path, hence no curvature), or ``m`` is not a finite, strictly
+        positive number.
+
+    Notes
+    -----
+    ``u`` and the fields must be taken at the same time and position: the states
+    ``(x^n, u^n)`` kept by ``integrate`` and the fields evaluated at ``x^n``.
+    """
+    u = np.asarray(u, dtype=np.float64)
+    e_field = np.asarray(e_field, dtype=np.float64)
+    b_field = np.asarray(b_field, dtype=np.float64)
+    for name, array in (("u", u), ("e_field", e_field), ("b_field", b_field)):
+        if array.ndim == 0 or array.shape[-1] != 3:
+            raise ValueError(
+                f"{name} must have shape (..., 3), the last axis holding the 3 "
+                f"components; got shape {array.shape}"
+            )
+    if (
+        isinstance(m, bool)
+        or not isinstance(m, (int, float))
+        or not np.isfinite(m)
+        or m <= 0.0
+    ):
+        raise ValueError(
+            f"m must be a finite, strictly positive number [kg], got {m!r}"
+        )
+    speed_squared = np.sum(u**2, axis=-1)
+    if np.any(speed_squared == 0.0):
+        raise ValueError(
+            "a velocity is zero: a particle at rest has no path, its curvature is "
+            "not defined"
+        )
+
+    gamma = np.sqrt(1.0 + speed_squared / c**2)
+    force_over_q = gamma[..., np.newaxis] * e_field + np.cross(u, b_field)
+    turning = np.linalg.norm(np.cross(u, force_over_q), axis=-1)
+    return abs(q) * turning / (m * speed_squared**1.5)
+
+
+def synchrotron_power(
+    u: NDArray[np.float64], kappa: ArrayLike, q: float
+) -> NDArray[np.float64]:
+    """Power radiated by each particle because its orbit is curved.
+
+    ``P = q^2 gamma^4 |v|^4 kappa^2 / (6 pi eps_0 c^3)`` (Carbajal et al. 2017,
+    Eq. 15), with ``kappa`` the curvature of the orbit (``curvature``). Since
+    ``gamma |v| = |u|`` it is computed as ``q^2 |u|^4 kappa^2 / (6 pi eps_0 c^3)``.
+
+    Parameters
+    ----------
+    u : ndarray, shape (..., 3)
+        Proper velocities ``u = gamma * v`` [m/s]. Any leading shape.
+    kappa : array_like, shape (...)
+        Curvature of the orbit [1/m] at the same states, of the shape of ``u``
+        without its last axis, or any shape that broadcasts with it.
+    q : float
+        Charge [C]; only its square matters.
+
+    Returns
+    -------
+    ndarray, shape (...)
+        Radiated power [W], positive or zero.
+
+    Raises
+    ------
+    ValueError
+        If the last axis of ``u`` does not have length 3, or ``kappa`` does not
+        broadcast with the leading shape of ``u``.
+
+    Notes
+    -----
+    This is the part of the radiated power due to the acceleration perpendicular
+    to the velocity, the one that curves the orbit. The Lienard formula has a
+    second part, due to the acceleration along the velocity,
+    ``q^4 E_par^2 / (6 pi eps_0 c^3 m^2)`` with ``E_par`` the electric field along
+    ``v``. It is not included: it vanishes without electric field, which is the
+    case of Eq. 15, and it is smaller than the first part by the factor
+    ``(E_par / (gamma |v| |B| sin(theta)))^2`` otherwise.
+    """
+    u = np.asarray(u, dtype=np.float64)
+    kappa = np.asarray(kappa, dtype=np.float64)
+    if u.ndim == 0 or u.shape[-1] != 3:
+        raise ValueError(
+            "u must have shape (..., 3), the last axis holding the 3 components; "
+            f"got shape {u.shape}"
+        )
+    try:
+        np.broadcast_shapes(u.shape[:-1], kappa.shape)
+    except ValueError:
+        raise ValueError(
+            "kappa must have the shape of u without its last axis, or broadcast "
+            f"with it; got {kappa.shape} for u of shape {u.shape}"
+        ) from None
+
+    u_squared = np.sum(u**2, axis=-1)
+    return q**2 * u_squared**2 * kappa**2 / (6.0 * np.pi * eps_0 * c**3)
+
+
+def synchrotron_kernel_integral(x: ArrayLike) -> NDArray[np.float64]:
+    """Integral of the modified Bessel function ``K_{5/3}`` from ``x`` to infinity.
+
+    ``F(x) = int_x^inf K_{5/3}(eta) d eta``, dimensionless. It gives the shape of
+    the synchrotron spectrum (Carbajal et al. 2017, Eq. 16, with
+    ``x = lambda_c / lambda``).
+
+    Near zero the integrand grows as ``eta^(-5/3)``, which a quadrature handles
+    badly. The recurrence ``K_{nu-1} + K_{nu+1} = -2 K'_nu`` (DLMF 10.29.1) at
+    ``nu = 2/3``, with ``K_{-1/3} = K_{1/3}``, removes this growth:
+
+        F(x) = 2 K_{2/3}(x) - int_x^inf K_{1/3}(eta) d eta
+
+    The remaining integrand grows only as ``eta^(-1/3)`` near zero and decays as
+    ``exp(-eta)``; it is integrated by ``scipy.integrate.quad``, one call per
+    value of ``x``.
+
+    Parameters
+    ----------
+    x : array_like
+        Lower bound of the integral, dimensionless, finite and strictly positive.
+        Any shape.
+
+    Returns
+    -------
+    ndarray
+        ``F(x)``, of the shape of ``x``, strictly positive up to ``x`` of about 700.
+
+    Raises
+    ------
+    ValueError
+        If a value of ``x`` is not finite or not strictly positive.
+
+    Notes
+    -----
+    Limits: ``F(x) ~ 2^(2/3) Gamma(2/3) x^(-2/3)`` as ``x -> 0`` and
+    ``F(x) ~ sqrt(pi / (2 x)) exp(-x)`` as ``x -> inf``. Beyond ``x`` of about 700,
+    ``scipy.special.kv`` underflows and the function returns 0, where the exact
+    value is below ``1e-305``. The accuracy is that of ``scipy.special.kv``: about
+    ``1e-13`` relative for ``x`` between 1 and 2, ``1e-15`` elsewhere. Each value
+    costs about 0.1 ms.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if not np.all(np.isfinite(x)) or np.any(x <= 0.0):
+        raise ValueError(
+            "x must hold finite, strictly positive values: the integral diverges "
+            f"at x = 0; got min {np.min(x, initial=np.inf)!r}"
+        )
+
+    integral = np.empty_like(x)
+    for index, x_value in np.ndenumerate(x):
+        # Relative tolerance only: F(x) falls below the default absolute
+        # tolerance of quad (1.5e-8) as soon as x > 17.
+        tail_of_k_one_third, _ = quad(
+            lambda eta: kv(1.0 / 3.0, eta),
+            x_value,
+            np.inf,
+            epsabs=0.0,
+            epsrel=1e-13,
+            limit=200,
+        )
+        integral[index] = 2.0 * kv(2.0 / 3.0, x_value) - tail_of_k_one_third
+    return integral
+
+
+def synchrotron_spectrum(
+    wavelength: ArrayLike,
+    u: NDArray[np.float64],
+    kappa: ArrayLike,
+    q: float,
+) -> NDArray[np.float64]:
+    """Synchrotron power radiated per unit wavelength by each particle.
+
+    Carbajal et al. (2017, Eq. 16):
+
+        P(lambda) = (1 / sqrt 3) q^2 c / (eps_0 gamma^2 lambda^3) F(lambda_c / lambda)
+
+    with ``F(x) = int_x^inf K_{5/3}`` (``synchrotron_kernel_integral``) and the
+    critical wavelength ``lambda_c = (2 lambda_0 / 3) (m c^2 / E)^3
+    = 4 pi / (3 kappa gamma^3)``, where ``lambda_0 = 2 pi / kappa`` and
+    ``E = gamma m c^2``.
+
+    Parameters
+    ----------
+    wavelength : array_like, shape (n_lambda,)
+        Wavelengths [m], finite and strictly positive.
+    u : ndarray, shape (..., 3)
+        Proper velocities ``u = gamma * v`` [m/s]. Any leading shape.
+    kappa : array_like, shape (...)
+        Curvature of the orbit [1/m] at the same states (``curvature``), finite
+        and positive or zero, of the shape of ``u`` without its last axis, or any
+        shape that broadcasts with it.
+    q : float
+        Charge [C]; only its square matters.
+
+    Returns
+    -------
+    ndarray, shape (..., n_lambda)
+        Spectral power density [W/m], positive or zero. It is zero for every
+        wavelength where ``kappa = 0``: a straight path does not radiate.
+
+    Raises
+    ------
+    ValueError
+        If ``wavelength`` is not one-dimensional or holds a value that is not
+        finite and strictly positive, the last axis of ``u`` does not have length
+        3, or ``kappa`` does not broadcast with ``u`` or holds a value that is not
+        finite and positive or zero.
+
+    Notes
+    -----
+    This is the spectrum of an ultra-relativistic particle. Its integral over all
+    wavelengths is ``q^2 c gamma^4 kappa^2 / (6 pi eps_0)``, the power of
+    ``synchrotron_power`` with ``|v|`` replaced by ``c``; the two differ by the
+    factor ``(|v| / c)^4``, that is by about ``2 / gamma^2``. One call of
+    ``synchrotron_kernel_integral`` is made per state and wavelength, about
+    0.1 ms each.
+    """
+    wavelength = np.asarray(wavelength, dtype=np.float64)
+    u = np.asarray(u, dtype=np.float64)
+    kappa = np.asarray(kappa, dtype=np.float64)
+    if (
+        wavelength.ndim != 1
+        or not np.all(np.isfinite(wavelength))
+        or np.any(wavelength <= 0.0)
+    ):
+        raise ValueError(
+            "wavelength must be a one-dimensional array of finite, strictly "
+            f"positive values [m]; got shape {wavelength.shape}"
+        )
+    if u.ndim == 0 or u.shape[-1] != 3:
+        raise ValueError(
+            "u must have shape (..., 3), the last axis holding the 3 components; "
+            f"got shape {u.shape}"
+        )
+    try:
+        state_shape = np.broadcast_shapes(u.shape[:-1], kappa.shape)
+    except ValueError:
+        raise ValueError(
+            "kappa must have the shape of u without its last axis, or broadcast "
+            f"with it; got {kappa.shape} for u of shape {u.shape}"
+        ) from None
+    if not np.all(np.isfinite(kappa)) or np.any(kappa < 0.0):
+        raise ValueError("kappa must hold finite values, positive or zero [1/m]")
+
+    gamma = np.broadcast_to(np.sqrt(1.0 + np.sum(u**2, axis=-1) / c**2), state_shape)
+    kappa = np.broadcast_to(kappa, state_shape)
+    spectrum = np.zeros(state_shape + wavelength.shape)
+
+    # A straight path (kappa = 0) has an infinite critical wavelength and no
+    # spectrum: those states keep their zeros.
+    curved = kappa > 0.0
+    gamma_curved = gamma[curved][:, np.newaxis]
+    critical_wavelength = 4.0 * np.pi / (3.0 * kappa[curved] * gamma[curved] ** 3)
+    x = critical_wavelength[:, np.newaxis] / wavelength
+    prefactor = q**2 * c / (np.sqrt(3.0) * eps_0 * gamma_curved**2 * wavelength**3)
+    spectrum[curved] = prefactor * synchrotron_kernel_integral(x)
+    return spectrum

@@ -1,6 +1,4 @@
-"""
-Calculate quickly some estimations for the simulation, such as the Larmor radius and the gyrofrequency.
-"""
+"""Quick estimates for a simulation: Larmor radius and drift velocity."""
 
 def larmor_radius(b_field: float, e_field: float, q: float, m: float) -> float:
     """
@@ -26,7 +24,7 @@ def larmor_radius(b_field: float, e_field: float, q: float, m: float) -> float:
 
 def v_perpendicular(e_field: float, b_field: float) -> float:
     """
-    Calculate the perpendicular velocity of a particle in crossed electric and magnetic fields.
+    Calculate the perpendicular velocity of a particle in crossed E and B fields.
 
     Parameters
     ----------
@@ -42,4 +40,5 @@ def v_perpendicular(e_field: float, b_field: float) -> float:
     """
     return e_field / b_field
 
-print("Larmor radius:", f"{larmor_radius(b_field=0.1, e_field=10**8, q=1.602e-19, m=9.109e-31)*1000:.2f}", "mm")
+radius = larmor_radius(b_field=0.1, e_field=10**8, q=1.602e-19, m=9.109e-31)
+print("Larmor radius:", f"{radius * 1000:.2f}", "mm")

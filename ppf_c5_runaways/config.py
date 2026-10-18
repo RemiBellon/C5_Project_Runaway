@@ -75,6 +75,7 @@ class FieldConfigCartesian(BaseModel):
 
     @property
     def coordinate_system(self) -> str:
+        """Coordinates in which positions and fields are given: cartesian."""
         return "cartesian"
 
 class FieldConfigMirror(BaseModel):

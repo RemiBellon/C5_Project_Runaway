@@ -1,6 +1,4 @@
-"""
-Time integrators for the motion of charged particles: one step of a pusher.
-"""
+"""Time integrators for the motion of charged particles: one step of a pusher."""
 
 from collections.abc import Callable
 from numbers import Real
@@ -489,6 +487,99 @@ def vay(
     return x_new, u_new
 
 
+def rk4(
+    x: NDArray[np.float64],
+    u: NDArray[np.float64],
+    field: Field,
+    t: float,
+    dt: float,
+    q: float,
+    m: float,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Advance the particles by one time step with the classical Runge-Kutta scheme.
+
+    This is the witness of the project, not a production pusher: it is fourth order
+    in ``dt``, far more accurate than the three others over a short time, but it
+    preserves no structure of the motion. In a pure magnetic field ``|u|`` is not
+    kept: the energy drifts steadily, step after step, where Boris and
+    Higuera-Cary keep it to rounding. The step is not symmetric in time and does
+    not preserve the phase-space volume.
+
+    Like the other pushers, it takes ``(x^n, u^n)`` at ``t`` and returns
+    ``(x^{n+1}, u^{n+1})`` at ``t + dt``. Unlike them, it does not evaluate the
+    field once at the middle of the step, but at its four stages.
+
+    Parameters
+    ----------
+    x : ndarray, shape (n_part, 3)
+        Positions ``x^n`` [m] at time ``t``.
+    u : ndarray, shape (n_part, 3)
+        Proper velocities ``u^n = gamma * v`` [m/s] at time ``t``.
+    field : Field
+        Function ``field(x, t) -> (E, B)``, each of shape ``(n_part, 3)``, in V/m
+        and T. It is called four times: at ``t``, twice at ``t + dt / 2`` and at
+        ``t + dt``, each time at the position of the stage.
+    t : float
+        Time [s] of ``x`` and ``u``.
+    dt : float
+        Time step [s], finite and non-zero. A negative ``dt`` steps backward.
+    q : float
+        Signed charge [C], for example ``-e`` for an electron.
+    m : float
+        Rest mass [kg], strictly positive.
+
+    Returns
+    -------
+    x_new : ndarray, shape (n_part, 3)
+        Positions ``x^{n+1}`` [m] at time ``t + dt``.
+    u_new : ndarray, shape (n_part, 3)
+        Proper velocities ``u^{n+1}`` [m/s] at time ``t + dt``.
+
+        Both are new arrays: ``x`` and ``u`` are not modified.
+
+    Raises
+    ------
+    ValueError
+        Same as ``boris``: wrong shapes, or ``t``, ``dt``, ``q``, ``m`` not finite
+        real numbers in their range.
+
+    Notes
+    -----
+    The equations of motion (Ripperda et al. 2018, Eqs. 1-2) are written as
+    ``d(x, u)/dt = f(x, u, t)`` with::
+
+        dx/dt = u / gamma,                   gamma = sqrt(1 + |u|^2 / c^2)
+        du/dt = (q / m) (E + (u / gamma) x B)
+
+    and one step is the classical four-stage formula::
+
+        k1 = f(x, u, t)
+        k2 = f(x + (dt / 2) k1_x, u + (dt / 2) k1_u, t + dt / 2)
+        k3 = f(x + (dt / 2) k2_x, u + (dt / 2) k2_u, t + dt / 2)
+        k4 = f(x + dt k3_x, u + dt k3_u, t + dt)
+        (x_new, u_new) = (x, u) + (dt / 6) (k1 + 2 k2 + 2 k3 + k4)
+    """
+    x, u = _check_push_arguments(x, u, t, dt, q, m)
+
+    def rate_of_change(
+        x_stage: NDArray[np.float64], u_stage: NDArray[np.float64], t_stage: float
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Return ``(dx/dt, du/dt)`` at one stage: velocity and Lorentz force."""
+        e_field, b_field = _evaluate_field(field, x_stage, t_stage)
+        velocity = u_stage / _lorentz_factor(u_stage)
+        return velocity, q / m * (e_field + np.cross(velocity, b_field))
+
+    half = 0.5 * dt
+    k1_x, k1_u = rate_of_change(x, u, t)
+    k2_x, k2_u = rate_of_change(x + half * k1_x, u + half * k1_u, t + half)
+    k3_x, k3_u = rate_of_change(x + half * k2_x, u + half * k2_u, t + half)
+    k4_x, k4_u = rate_of_change(x + dt * k3_x, u + dt * k3_u, t + dt)
+
+    x_new = x + dt / 6.0 * (k1_x + 2.0 * k2_x + 2.0 * k3_x + k4_x)
+    u_new = u + dt / 6.0 * (k1_u + 2.0 * k2_u + 2.0 * k3_u + k4_u)
+    return x_new, u_new
+
+
 # --- choosing a pusher by name -----------------------------------------------------
 
 
@@ -502,7 +593,7 @@ def get_pusher(name: str) -> Pusher:
     Parameters
     ----------
     name : str
-        ``"boris"``, ``"higuera_cary"`` or ``"vay"``.
+        ``"boris"``, ``"higuera_cary"``, ``"vay"`` or ``"rk4"``.
 
     Returns
     -------
@@ -512,8 +603,7 @@ def get_pusher(name: str) -> Pusher:
     Raises
     ------
     ValueError
-        If there is no pusher of that name (or it is not written yet, like
-        ``"rk4"``). The message lists the available ones.
+        If there is no pusher of that name. The message lists the available ones.
 
     Examples
     --------
@@ -526,6 +616,7 @@ def get_pusher(name: str) -> Pusher:
     available: dict[str, Pusher] = {
         "boris": boris,
         "higuera_cary": higuera_cary,
+        "rk4": rk4,
         "vay": vay,
     }
     if name not in available:

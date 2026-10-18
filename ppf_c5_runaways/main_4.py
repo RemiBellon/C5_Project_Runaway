@@ -1,3 +1,5 @@
+"""Gyration phase in a uniform B: Ripperda et al. (2018), Sec. 3.1.2, Fig. 4."""
+
 import math
 from pathlib import Path
 
