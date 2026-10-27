@@ -80,7 +80,7 @@ def custom_toroidal(*, b0: float, r0: float, b_r: str, b_theta: str, b_phi: str)
     return field
 """
 
-def custom_toroidal(*, b0, r0, q0,lamb, b_r, b_theta, b_phi):
+def custom_toroidal(*, b0, r0, q0,lamb, b_r, b_theta, b_phi, E0, e_r, e_theta, e_phi) -> Field:
     context = {"b0": b0, "r0": r0, "q0": q0, "lamb":lamb, "cos": np.cos, "sin": np.sin, "sqrt": np.sqrt}
 
     # Compile once, outside the loop
@@ -95,7 +95,23 @@ def custom_toroidal(*, b0, r0, q0,lamb, b_r, b_theta, b_phi):
         b_theta_val = eval(code_theta, {}, local_vars)
         b_phi_val = eval(code_phi, {}, local_vars)
         b = _toroidal_to_cartesian_vector(b_r_val, b_theta_val, b_phi_val, theta, phi)
-        e = np.zeros_like(b)
+
+        if E0 is None or E0 == 0:
+
+            e = np.zeros_like(b)
+        else:
+            # Compile electric field expressions
+            code_e_r = compile(e_r, "<e_r>", "eval")
+            code_e_theta = compile(e_theta, "<e_theta>", "eval")
+            code_e_phi = compile(e_phi, "<e_phi>", "eval")
+
+            local_vars["E0"] = E0
+            e_r_val = eval(code_e_r, {}, local_vars)
+            e_theta_val = eval(code_e_theta, {}, local_vars)
+            e_phi_val = eval(code_e_phi, {}, local_vars)
+            e = _toroidal_to_cartesian_vector(e_r_val, e_theta_val, e_phi_val, theta, phi)
+       
+
         return e, b
 
     return field

@@ -303,8 +303,7 @@ def orbit_rz(
     with plt.rc_context(figure_style()):
         figure, axes = plt.subplots()
         if r0 is not None and a is not None:
-            #r0_mm = r0 * _METRES_TO_MILLIMETRES
-            #a_mm = a * _METRES_TO_MILLIMETRES
+    
             theta = np.linspace(0.0, 2.0 * np.pi, 300)
             axes.plot(
                 r0 + a * np.cos(theta),
@@ -314,7 +313,7 @@ def orbit_rz(
             )
 
         for k, (name, result) in enumerate(results.items()):
-            x = result["x"].values #* _METRES_TO_MILLIMETRES
+            x = result["x"].values 
             radius = np.hypot(x[:, :, 0], x[:, :, 1])
             height = x[:, :, 2]
             n_part = x.shape[1]
@@ -603,6 +602,7 @@ def visu_toroidal_fields(
         b0=cfg.field.b0, r0=cfg.field.r0, q0=cfg.field.q0,
         lamb=cfg.field.lamb, b_r=cfg.field.b_r,
         b_theta=cfg.field.b_theta, b_phi=cfg.field.b_phi,
+        E0=cfg.field.E0, e_r=cfg.field.e_r, e_theta=cfg.field.e_theta, e_phi=cfg.field.e_phi
     )
 
     N = 20

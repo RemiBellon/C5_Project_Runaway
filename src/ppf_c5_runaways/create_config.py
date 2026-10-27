@@ -6,7 +6,8 @@ import numpy as np
 from ppf_c5_runaways.fields import custom_toroidal
 
 
-def new_config(name: str, kind: str ='tokamak',  b_field: list=[5.3, 6.2, 4, 1.6, "0", "b0 * r * q0 * (1 + r**2/lamb**2) * 1 / r0*(1 + (r/r0)*cos(theta))","b0 * 1 / (1 + (r/r0)*cos(theta))"], e_field: list=None,
+def new_config(name: str, kind: str ='tokamak',  b_field: list=[5.3, 6.2, 4, 1.6, "0", "b0 * r * q0 * (1 + r**2/lamb**2) * 1 / r0*(1 + (r/r0)*cos(theta))","b0 * 1 / (1 + (r/r0)*cos(theta))"], 
+                  e_field: list=None,
                   steps: int = 1000, pusher: str='boris',
                   dt: float = 1e-11, save_every: int = 5, seed: int = 42, 
                   q: float = -1.602176634e-19, m: float = 9.1093837139e-31, 
@@ -23,9 +24,12 @@ def new_config(name: str, kind: str ='tokamak',  b_field: list=[5.3, 6.2, 4, 1.6
 
     if kind == 'tokamak':
         b0, r0, lamb, q0, b_r, b_theta, b_phi= b_field
+        if e_field is None:
+            e_field = [0, 0, 0, 0]
         field_dict = CommentedMap({
             'kind': 'tokamak', 'b0': b0, 'r0': r0, 'lamb': lamb, 'q0': q0,
-            'b_r': b_r, 'b_theta': b_theta, 'b_phi': b_phi,
+            'b_r': b_r, 'b_theta': b_theta, 'b_phi': b_phi, 
+            'E0': e_field[0], 'e_r': str(e_field[1]), 'e_theta': str(e_field[2]), 'e_phi': str(e_field[3])
         })
         field_dict.fa.set_block_style()
     elif kind == 'uniform':
@@ -109,6 +113,7 @@ def u_from_theta(energy, theta, m=m_e,
         b_r=b_field[4],
         b_theta=b_field[5],
         b_phi=b_field[6],
+        E0=0, e_r='0', e_theta='0', e_phi='0'
     )
 
     _, B = field(x0, 0.0)

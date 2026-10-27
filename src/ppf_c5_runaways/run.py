@@ -55,7 +55,7 @@ def pusher(
     if config.field.kind == "uniform_cartesian":
         field = fields.uniform(b_field=config.field.b_field, e_field=config.field.e_field)#, coordinate_system=config.field.coordinate_system)
     if config.field.kind == "tokamak":
-        field = fields.custom_toroidal(b0=config.field.b0, r0=config.field.r0,  q0=config.field.q0,  lamb=config.field.lamb,  b_r=config.field.b_r, b_theta=config.field.b_theta, b_phi=config.field.b_phi)
+        field = fields.custom_toroidal(b0=config.field.b0, r0=config.field.r0,  q0=config.field.q0,  lamb=config.field.lamb,  b_r=config.field.b_r, b_theta=config.field.b_theta, b_phi=config.field.b_phi, E0=config.field.E0, e_r=config.field.e_r, e_theta=config.field.e_theta, e_phi=config.field.e_phi)
     t, x, u, E, B = integrate(
         x0=np.array(config.initial.x0),
         u0=np.array(config.initial.u0),

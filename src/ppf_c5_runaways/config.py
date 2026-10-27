@@ -131,6 +131,10 @@ class FieldConfigSpherical(BaseModel):
     b_r: str
     b_theta: str
     b_phi: str
+    E0: float = Field(allow_inf_nan=False)
+    e_r: str
+    e_theta: str
+    e_phi: str
 
     @property
     def coordinate_system(self) -> str:
