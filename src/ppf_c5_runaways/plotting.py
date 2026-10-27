@@ -303,18 +303,18 @@ def orbit_rz(
     with plt.rc_context(figure_style()):
         figure, axes = plt.subplots()
         if r0 is not None and a is not None:
-            r0_mm = r0 * _METRES_TO_MILLIMETRES
-            a_mm = a * _METRES_TO_MILLIMETRES
+            #r0_mm = r0 * _METRES_TO_MILLIMETRES
+            #a_mm = a * _METRES_TO_MILLIMETRES
             theta = np.linspace(0.0, 2.0 * np.pi, 300)
             axes.plot(
-                r0_mm + a_mm * np.cos(theta),
-                a_mm * np.sin(theta),
+                r0 + a * np.cos(theta),
+                a * np.sin(theta),
                 color="black",
                 label="_tokamak boundary",
             )
 
         for k, (name, result) in enumerate(results.items()):
-            x = result["x"].values * _METRES_TO_MILLIMETRES
+            x = result["x"].values #* _METRES_TO_MILLIMETRES
             radius = np.hypot(x[:, :, 0], x[:, :, 1])
             height = x[:, :, 2]
             n_part = x.shape[1]
@@ -338,8 +338,8 @@ def orbit_rz(
                     color=line.get_color(),
                 )
 
-        axes.set_xlabel("Major radius R [mm]")
-        axes.set_ylabel("Height Z [mm]")
+        axes.set_xlabel("Major radius R [m]")
+        axes.set_ylabel("Height Z [m]")
         dt = next(iter(results.values())).attrs["dt"]
         if len(results) == 1:
             title = f"Poloidal orbit, pusher {names[0]!r}, dt = {dt:.3g} s"
