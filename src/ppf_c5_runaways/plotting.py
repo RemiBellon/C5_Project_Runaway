@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.rcsetup import cycler
 from matplotlib.typing import RcKeyType
+from matplotlib.patches import Wedge
 
 import numpy as np
 
@@ -123,6 +124,8 @@ def orbit_xy(
     *,
     show: bool = True,
     save_path: str | Path | None = None,
+    r0: float | None = None,
+    a: float | None = None,
 ) -> Figure:
     """
     Draw the trajectory of each particle in the (x, y) plane.
@@ -160,6 +163,9 @@ def orbit_xy(
     ValueError
         If a pusher is not in the folder. The message lists those it has.
     """
+
+
+
     if pusher is None:
         names = list_results(result_dir)
         if not names:
@@ -177,6 +183,26 @@ def orbit_xy(
     # constrained_layout, so there is no figure.tight_layout() here.
     with plt.rc_context(figure_style()):
         figure, axes = plt.subplots()
+        if r0 is not None:
+            if a is None:
+                raise ValueError("a (minor radius) is required when r0 is given")
+            r0_mm = r0 * _METRES_TO_MILLIMETRES
+            a_mm = a * _METRES_TO_MILLIMETRES
+
+            torus = Wedge(
+                (0, 0),
+                r0_mm + a_mm,
+                0,
+                360,
+                width=2 * a_mm,
+                facecolor="lightgray",
+                edgecolor="none",
+                alpha=0.5,
+                zorder=0,
+            )
+            axes.add_patch(torus)
+
+        
         for k, (name, result) in enumerate(results.items()):
             x = result["x"].values * _METRES_TO_MILLIMETRES  # (n_saved, n_part, 3)
             n_part = x.shape[1]
@@ -202,11 +228,127 @@ def orbit_xy(
         else:
             title = f"Orbit seen from above, dt = {dt:.3g} s"
         axes.set_title(title)
-        #axes.set_aspect("equal")  # a circle must look like a circle
+        axes.set_aspect("equal")  # a circle must look like a circle
         if len(axes.get_legend_handles_labels()[0]) > 1:
             axes.legend()
 
 
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.show()
+    return figure
+
+
+def orbit_rz(
+    result_dir: str | Path,
+    pusher: str | Sequence[str] | None = None,
+    *,
+    r0: float | None = None,
+    a: float | None = None,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """
+    Draw particle trajectories in the tokamak's poloidal (R, Z) cross-section.
+
+    Cartesian positions are projected to major radius ``R = sqrt(x**2 + y**2)``
+    and height ``Z = z``. If ``r0`` and ``a`` are given, draw the circular
+    cross-section of the tokamak, centered at ``(r0, 0)`` with radius ``a``.
+
+    Parameters
+    ----------
+    result_dir : str or pathlib.Path
+        Results folder given by ``run.pusher``.
+    pusher : str or sequence of str, optional
+        Which pusher(s) of the folder to draw. Default: all pushers in the folder.
+    r0 : float, optional
+        Major radius [m] of the tokamak. Must be given together with ``a``.
+    a : float, optional
+        Minor radius [m] of the tokamak. Must be given together with ``r0``.
+    show : bool, optional
+        Open the figure in a window. Default ``True``.
+    save_path : str or pathlib.Path, optional
+        If given, save the figure as PNG and PDF using ``save_figure``.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure, square, 6 x 6 in.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no pusher is given and the folder holds no trajectories.
+    ValueError
+        If a pusher is not in the folder, or only one of ``r0`` and ``a`` is given.
+    """
+    if (r0 is None) != (a is None):
+        raise ValueError("r0 and a must be provided together")
+
+    if pusher is None:
+        names = list_results(result_dir)
+        if not names:
+            raise FileNotFoundError(
+                f"No trajectories in {result_dir}: has a simulation been run in this "
+                "folder?"
+            )
+    elif isinstance(pusher, str):
+        names = [pusher]
+    else:
+        names = list(pusher)
+    results = {name: read_result(result_dir, name) for name in names}
+
+    with plt.rc_context(figure_style()):
+        figure, axes = plt.subplots()
+        if r0 is not None and a is not None:
+            r0_mm = r0 * _METRES_TO_MILLIMETRES
+            a_mm = a * _METRES_TO_MILLIMETRES
+            theta = np.linspace(0.0, 2.0 * np.pi, 300)
+            axes.plot(
+                r0_mm + a_mm * np.cos(theta),
+                a_mm * np.sin(theta),
+                color="black",
+                label="_tokamak boundary",
+            )
+
+        for k, (name, result) in enumerate(results.items()):
+            x = result["x"].values * _METRES_TO_MILLIMETRES
+            radius = np.hypot(x[:, :, 0], x[:, :, 1])
+            height = x[:, :, 2]
+            n_part = x.shape[1]
+            for i in range(n_part):
+                if len(results) == 1:
+                    label = f"particle {i}"
+                elif n_part == 1:
+                    label = name
+                else:
+                    label = f"{name}, particle {i}"
+                (line,) = axes.plot(
+                    radius[:, i],
+                    height[:, i],
+                    linestyle=_LINE_STYLES[k % len(_LINE_STYLES)],
+                    label=label,
+                )
+                axes.plot(
+                    radius[0, i],
+                    height[0, i],
+                    "o",
+                    color=line.get_color(),
+                )
+
+        axes.set_xlabel("Major radius R [mm]")
+        axes.set_ylabel("Height Z [mm]")
+        dt = next(iter(results.values())).attrs["dt"]
+        if len(results) == 1:
+            title = f"Poloidal orbit, pusher {names[0]!r}, dt = {dt:.3g} s"
+        else:
+            title = f"Poloidal orbit, dt = {dt:.3g} s"
+        axes.set_title(title)
+        axes.set_aspect("equal")
+        if len(axes.get_legend_handles_labels()[0]) > 1:
+            axes.legend()
 
     if save_path is not None:
         save_figure(figure, save_path)

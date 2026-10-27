@@ -1,0 +1,16 @@
+name: tokamak
+pusher: boris
+dt: 7.0e-13
+n_steps: 800000
+save_every: 5
+seed: 42
+q: -1.602176634e-19
+m: 9.1093837139e-31
+field: {kind: tokamak, b0: 5.3, r0: 6.2, lamb: 4.0, q0: 1.6, b_r: '0', b_theta: b0
+    * r * q0 * (1 + r**2/lamb**2) * 1 / r0*(1 + (r/r0)*cos(theta)), b_phi: b0 * 1
+    / (1 + (r/r0)*cos(theta))}
+initial:
+  x0:
+  - [1.0, 7.2, 0.0]
+  u0:
+  - [294600000.0, 52050000.0, 18604000.0]

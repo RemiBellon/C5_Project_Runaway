@@ -1,7 +1,7 @@
 name: uniform_b_and_e       # names the results folder: letters, digits, _ and - only
 pusher: boris          # boris | higuera_cary | vay
 dt: 1.0e-13            # time step [s]
-n_steps: 1000        # number of time steps
+n_steps: 10000        # number of time steps
 save_every: 5          # keep one state every 5 steps (must divide n_steps)
 seed: 42               # random seed (not used yet: needed once collisions exist)
 
@@ -9,7 +9,7 @@ q: -1.602176634e-19    # charge [C]: negative for an electron
 m: 9.1093837139e-31    # mass [kg]
 
 field:
-  kind: uniform
+  kind: uniform_cartesian
   b_field: [0, 0, 0.1]   # [T]
   e_field: [0, 1000000, 0]     # [V/m]
 

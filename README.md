@@ -76,6 +76,7 @@ result_dir = run.pusher("configs/uniform_b.yaml")
 
 plotting.gamma_vs_time(result_dir)
 plotting.orbit_xy(result_dir)
+plotting.orbit_rz(result_dir, r0=6.2, a=2.0)
 plotting.energy_error(result_dir, reference="analytic")
 ```
 

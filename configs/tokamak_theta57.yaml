@@ -1,0 +1,22 @@
+name: tokamak_theta57
+pusher: boris
+n_steps: 10000
+dt: 1e-11
+save_every: 5
+seed: 42
+q: -1.602176634e-19
+m: 9.1093837139e-31
+field: 
+  kind: tokamak 
+  b0: 5.3 
+  r0: 6.2 
+  lamb: 4
+  q0: 1.6 
+  b_r: '0'
+  b_theta: "b0 * r * q0 * (1 + r**2/lamb**2) * 1 / r0*(1 + (r/r0)*cos(theta))"
+  b_phi: "b0 * 1 / (1 + (r/r0)*cos(theta))"
+initial:
+  x0:
+    [[1, 7.2, 0]]
+  u0:
+    [[-14434646380.02204, -17863709699.20248, 4811129486.258428]]

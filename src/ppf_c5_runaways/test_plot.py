@@ -413,14 +413,30 @@ def orbit_3D(
             plt.show()
     return figure
 
+"""
+import numpy as np
 
 
-    
+r =np.arange(0,10,0.1)
+B0 = 5.3
+C = 1
+lam = 4
+R = 6.2
+q0 = 1.6
+B = np.sqrt((1/(1+r/R*C) * B0)**2 + (1/(1+r/R*C) * B0* r / R /q0 / (1+r**2/lam**2))**2 )
 
-result_dir = run.pusher("configs/uniform_b_and_e_boris.yaml")
+plt.plot(r,B)
+plt.show()
+
+  """
+
+#result_dir = run.pusher("configs/uniform_b_and_e_boris.yaml")
 #result_dir = run.pusher("configs/uniform_b_vay.yaml")
 #result_dir = run.pusher("configs/uniform_b_higuera_cary.yaml")
 
 
-orbit_3D("results/uniform_b_and_e_20260924_132730", pusher="boris")
+
+
+
+#orbit_3D("results/uniform_b_and_e_20260924_132730", pusher="boris")
 #orbit_yz(result_dir, pusher="boris")

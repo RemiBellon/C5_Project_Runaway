@@ -52,6 +52,33 @@ def test_orbit_draws_the_stored_positions_in_millimetres(result_dir):
     plt.close(figure)
 
 
+def test_orbit_rz_projects_positions_and_draws_tokamak_cross_section(result_dir):
+    directory, x = result_dir
+
+    figure = plotting.orbit_rz(directory, r0=6.2, a=2.0, show=False)
+
+    axes = figure.axes[0]
+    orbit = axes.lines[1]
+    np.testing.assert_allclose(
+        orbit.get_xdata(), np.hypot(x[:, 0, 0], x[:, 0, 1]) * 1.0e3
+    )
+    np.testing.assert_allclose(orbit.get_ydata(), x[:, 0, 2] * 1.0e3)
+    boundary = axes.lines[0]
+    assert boundary.get_xdata().min() == pytest.approx(4200.0)
+    assert boundary.get_xdata().max() == pytest.approx(8200.0)
+    assert axes.get_xlabel() == "Major radius R [mm]"
+    assert axes.get_ylabel() == "Height Z [mm]"
+    assert axes.get_aspect() == 1.0
+    plt.close(figure)
+
+
+def test_orbit_rz_requires_both_tokamak_radii(result_dir):
+    directory, _ = result_dir
+
+    with pytest.raises(ValueError, match="r0 and a must be provided together"):
+        plotting.orbit_rz(directory, r0=6.2, show=False)
+
+
 def test_orbit_is_saved_as_a_png_and_a_pdf(result_dir, tmp_path):
     directory, _ = result_dir
 

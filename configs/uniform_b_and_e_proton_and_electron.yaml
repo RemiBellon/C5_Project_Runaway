@@ -1,0 +1,22 @@
+name: uniform_b_and_e_proton_and_electron      # names the results folder: letters, digits, _ and - only
+pusher: boris          # boris | higuera_cary | vay
+dt: 1.0e-13            # time step [s]
+n_steps: 100000          # number of time steps
+save_every: 5          # keep one state every 5 steps (must divide n_steps)
+seed: 42               # random seed (not used yet: needed once collisions exist)
+
+#q: [-1.602176634e-19, 1.602176634e-19]    # charge [C]: negative for an electron
+#m: [9.1093837139e-31, 1.67262192369e-27]    # mass [kg]
+q: -1.602176634e-19   # charge [C]: negative for an electron
+m: 9.1093837139e-31    # mass [kg]
+
+
+
+field:
+  kind: uniform_cartesian
+  b_field: [0, 0, 0.05]   # [T]
+  e_field: [0, 100000, 0]     # [V/m]
+
+initial:
+  x0: [[0, 0, 0],[0.1, 0.1, 0.1] ]              # positions [m], one row [x, y, z] per particle
+  u0: [[4.0e8, 0, 3.0e8], [3.0e8, 0, 5.0e8]]      # proper velocities u = gamma*v [m/s], one row per particle
