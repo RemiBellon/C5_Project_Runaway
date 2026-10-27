@@ -17,7 +17,13 @@ def integrate(
     save_every: int,
     q: float,
     m: float,
-) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+ ) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+]:
     """
     Advance the particles for ``n_steps`` fixed time steps, keeping some states.
 
@@ -71,7 +77,10 @@ def integrate(
     t_saved = np.empty(n_saved)
     x_saved = np.empty((n_saved, *x.shape))
     u_saved = np.empty((n_saved, *x.shape))
+    e_saved = np.empty((n_saved, *x.shape))
+    b_saved = np.empty((n_saved, *x.shape))
     t_saved[0], x_saved[0], u_saved[0] = 0.0, x, u
+    e_saved[0], b_saved[0] = field(x, 0.0)
 
     for step in range(1, n_steps + 1):
         # The state is (x^{step-1}, u^{step-3/2}) at time (step-1)*dt.
@@ -79,5 +88,6 @@ def integrate(
         if step % save_every == 0:
             i = step // save_every
             t_saved[i], x_saved[i], u_saved[i] = step * dt, x, u
+            e_saved[i], b_saved[i] = field(x, step * dt)
 
-    return t_saved, x_saved, u_saved
+    return t_saved, x_saved, u_saved, e_saved, b_saved

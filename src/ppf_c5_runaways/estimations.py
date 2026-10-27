@@ -153,3 +153,5 @@ def tot_energy(B:np.array, e_field:np.array, v:np.array, m:float=9.109e-31, q:fl
     return kinetic_energy(v, m) + magnetic_energy(B, v, m) + electric_energy(e_field, v, q)
 
 #print("Larmor radius:", f"{larmor_radius(b_field=0.1, e_field=10**8, q=1.602e-19, m=9.109e-31)*1000:.2f}", "mm")
+
+

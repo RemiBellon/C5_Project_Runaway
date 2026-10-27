@@ -157,7 +157,10 @@ def write_result(
     t: NDArray[np.float64],
     x: NDArray[np.float64],
     u: NDArray[np.float64],
-    dt: float,
+    e_field: NDArray[np.float64],
+    b_field: NDArray[np.float64],
+    dt: float
+    
 ) -> None:
     """Store the trajectories of one pusher in the results folder ``run_dir``.
 
@@ -232,6 +235,8 @@ def write_result(
         data_vars={
             "x": (("time", "particle", "axis"), x, {"units": "m"}),
             "u": (("time_half", "particle", "axis"), u, {"units": "m/s"}),
+            "E": (("time", "particle", "axis"), e_field, {"units": "V/m"}),
+            "B": (("time", "particle", "axis"), b_field, {"units": "T"}),
         },
         coords={
             "time": ("time", t, {"units": "s"}),
