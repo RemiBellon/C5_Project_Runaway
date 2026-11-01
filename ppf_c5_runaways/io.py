@@ -217,6 +217,8 @@ def write_result(
     *,
     b_field: NDArray[np.float64],
     step_jacobian_determinant: NDArray[np.float64] | None = None,
+    poloidal_flux: NDArray[np.float64] | None = None,
+    poloidal_flux_half_step: NDArray[np.float64] | None = None,
 ) -> None:
     """Store the trajectories of one pusher in the results folder ``run_dir``.
 
@@ -260,6 +262,15 @@ def write_result(
         (``diagnostics.step_jacobian_determinant``), dimensionless. Stored only if
         given: it is costly and asked for by ``run.pusher(...,
         phase_space_volume=True)``.
+    poloidal_flux : ndarray, shape (n_saved, n_part), optional
+        Poloidal flux function ``Psi`` [T m^2] at the positions ``x``, for the
+        canonical toroidal momentum ``P_zeta``
+        (``diagnostics.canonical_toroidal_momentum``). Given by ``run`` for the
+        tokamak field of Carbajal et al. (2017).
+    poloidal_flux_half_step : ndarray, shape (n_saved, n_part), optional
+        The same at ``x^{n+1/2}`` (``diagnostics.half_step_position``), to measure
+        the error of a diagnostic that pairs it with ``u^n`` (roadmap C5(c)).
+        Stored only together with ``poloidal_flux``.
 
     Raises
     ------
@@ -267,7 +278,8 @@ def write_result(
         If ``run_dir`` does not exist.
     ValueError
         If ``pusher_name`` is not valid, ``dt`` is not finite and positive, or the
-        arrays do not have the shapes above. Nothing is written.
+        arrays do not have the shapes above, or ``poloidal_flux_half_step`` is
+        given without ``poloidal_flux``. Nothing is written.
     FileExistsError
         If the group ``pusher_name`` is already in ``data.nc``. Nothing is modified.
     """
@@ -304,6 +316,24 @@ def write_result(
                 "step_jacobian_determinant must have shape (n_saved, n_part) = "
                 f"{x.shape[:2]}; got {step_jacobian_determinant.shape}"
             )
+    if poloidal_flux_half_step is not None and poloidal_flux is None:
+        raise ValueError(
+            "poloidal_flux_half_step is only stored together with poloidal_flux"
+        )
+    fluxes = {}
+    for name, flux in (
+        ("poloidal_flux", poloidal_flux),
+        ("poloidal_flux_half_step", poloidal_flux_half_step),
+    ):
+        if flux is None:
+            continue
+        flux = np.asarray(flux)
+        if flux.shape != x.shape[:2]:
+            raise ValueError(
+                f"{name} must have shape (n_saved, n_part) = {x.shape[:2]}; "
+                f"got {flux.shape}"
+            )
+        fluxes[name] = flux
 
     data_path = run_dir / DATA_FILENAME
     existed = data_path.exists()
@@ -338,6 +368,16 @@ def write_result(
                 "meaning": "determinant of the step (x^n, u^n) -> (x^n+1, u^n+1)",
             },
         )
+    meanings = {
+        "poloidal_flux": "Psi at x[i]",
+        "poloidal_flux_half_step": "Psi at x[i] + (dt / 2) u[i] / gamma[i]",
+    }
+    for name, flux in fluxes.items():
+        dataset[name] = (
+            ("time", "particle"),
+            flux,
+            {"units": "T m^2", "meaning": meanings[name]},
+        )
     try:
         dataset.to_netcdf(data_path, mode="a", group=pusher_name, engine="h5netcdf")
     except BaseException:
@@ -362,7 +402,10 @@ def read_result(run_dir: str | Path, pusher_name: str) -> xr.Dataset:
         Fully loaded in memory (the file is closed). Variables ``x`` [m], ``u``
         [m/s] and ``b_field`` [T], all of dimensions ``(time, particle, axis)``: the
         positions, the proper velocities and the magnetic field felt, at the same
-        times. Attributes ``pusher``, ``dt`` and ``convention``.
+        times. Attributes ``pusher``, ``dt`` and ``convention``. The optional
+        variables of ``write_result`` (``step_jacobian_determinant``,
+        ``poloidal_flux``, ``poloidal_flux_half_step``) are there if they were
+        written, of dimensions ``(time, particle)``.
 
     Raises
     ------

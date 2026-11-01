@@ -78,6 +78,7 @@ class FieldConfigCartesian(BaseModel):
         """Coordinates in which positions and fields are given: cartesian."""
         return "cartesian"
 
+
 class FieldConfigMirror(BaseModel):
     """Static magnetic bottle of Ripperda et al. (2018, Eq. 59), no electric field.
 
@@ -113,42 +114,100 @@ class FieldConfigMirror(BaseModel):
         return "cartesian"
 
 
-class FieldConfigSpherical(BaseModel):
-    """Electromagnetic field in which the particles move.
+class FieldConfigCarbajal(BaseModel):
+    """Analytic tokamak field of Carbajal et al. (2017, Eqs. 4, 5 and 7).
 
-    kind : {"uniform"}
-        Shape of the field. Only a field that is the same everywhere and at every
-        time for now; other kinds (E x B, mirror, tokamak) come with stage 1 to 3.
-    b_field : tuple of 3 floats
-        Magnetic field ``(B_r, B_theta, B_phi)`` [T].
-    e_field : tuple of 3 floats
-        Electric field ``(E_r, E_theta, E_phi)`` [V/m]. Write ``[0, 0, 0]`` for no electric
-        field: it is never assumed.
+    The parameters are those of the equations, as taken by ``fields.carbajal``
+    (decision D2). For a safety factor ``q_edge`` at the plasma edge ``r_edge``:
+    ``lam = r_edge / sqrt(q_edge / q0 - 1)``, that is ``lam = 1.0 m`` for DIII-D
+    (``r_edge = 0.5 m``, ``q0 = 1.6``, ``q_edge = 2``) and ``4.0 m`` for ITER.
+    Positions and velocities stay cartesian; no plasma edge is imposed.
 
+    Attributes
+    ----------
+    kind : {"carbajal"}
+        Selects this field.
+    b0 : float
+        Toroidal field on the magnetic axis [T], finite and strictly positive.
+    r0 : float
+        Major radius ``R0`` [m], finite and strictly positive.
+    q0 : float
+        Safety factor on the magnetic axis, finite and strictly positive.
+    lam : float
+        Length ``lambda`` of the profile ``q(r) = q0 (1 + r^2 / lam^2)`` [m], finite
+        and strictly positive.
+    e0 : float
+        Toroidal electric field on the magnetic axis [V/m], finite and signed
+        (decision D3): ``e0 < 0`` accelerates the electrons that move along ``B``.
+        Write ``0`` for no electric field: it is never assumed.
+
+    Raises
+    ------
     pydantic.ValidationError
-        If a vector does not have exactly 3 finite numbers, or a key is unknown or
-        missing.
+        If a value is missing, not finite, or not strictly positive where it must
+        be, or a key is unknown.
     """
 
     model_config = _MODEL_CONFIG
 
-    kind: Literal["tokamak"]
-    b0: float = Field(allow_inf_nan=False)
+    kind: Literal["carbajal"]
+    b0: float = Field(gt=0.0, allow_inf_nan=False)
     r0: float = Field(gt=0.0, allow_inf_nan=False)
-    lamb: float = Field(gt=0.0, allow_inf_nan=False)
     q0: float = Field(gt=0.0, allow_inf_nan=False)
-    b_r: str
-    b_theta: str
-    b_phi: str
+    lam: float = Field(gt=0.0, allow_inf_nan=False)
+    e0: FiniteFloat
 
     @property
     def coordinate_system(self) -> str:
-        return "spherical"
+        """Coordinates in which positions and fields are given: cartesian."""
+        return "cartesian"
+
+
+class FieldConfigHigueraCaryShear(BaseModel):
+    """Static sheared field of Higuera and Cary (2017, Sec. VI, Eqs. 48-49).
+
+    ``E = -a x x_hat`` and ``B = b y x_hat`` (see ``fields.higuera_cary_shear``),
+    the field of the Poincare section of roadmap C7. The values of the paper,
+    ``a = 1`` and ``b = 2`` in units where ``q = m = c = 1``, become for an electron
+    and a unit of length ``L0``: ``a = m c^2 / (q L0^2)`` and ``b = 2 m c / (q L0^2)``,
+    both negative.
+
+    Attributes
+    ----------
+    kind : {"higuera_cary_shear"}
+        Selects this field.
+    a : float
+        Gradient of the electric field [V/m^2], finite and signed. Write ``0`` for
+        no electric field: it is never assumed.
+    b : float
+        Gradient of the magnetic field [T/m], finite and signed.
+
+    Raises
+    ------
+    pydantic.ValidationError
+        If a value is missing or not finite, or a key is unknown.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    kind: Literal["higuera_cary_shear"]
+    a: FiniteFloat
+    b: FiniteFloat
+
+    @property
+    def coordinate_system(self) -> str:
+        """Coordinates in which positions and fields are given: cartesian."""
+        return "cartesian"
+
 
 FieldConfig = Annotated[
-    FieldConfigCartesian | FieldConfigMirror | FieldConfigSpherical,
+    FieldConfigCartesian
+    | FieldConfigMirror
+    | FieldConfigCarbajal
+    | FieldConfigHigueraCaryShear,
     Field(discriminator="kind"),
 ]
+
 
 class InitialState(BaseModel):
     """Positions and velocities of the particles at ``t = 0``.

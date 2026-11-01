@@ -9,11 +9,11 @@ import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.rcsetup import cycler
+from matplotlib.ticker import NullFormatter
 from matplotlib.typing import RcKeyType
 from numpy.typing import NDArray
 
 import ppf_c5_runaways.config as config
-import ppf_c5_runaways.fields as fields
 from ppf_c5_runaways import diagnostics
 from ppf_c5_runaways.constants import c
 from ppf_c5_runaways.io import CONFIG_FILENAME, list_results, read_result
@@ -23,13 +23,13 @@ from ppf_c5_runaways.io import CONFIG_FILENAME, list_results, read_result
 _METRES_TO_MILLIMETRES = 1.0e3
 
 _LINE_COLORS = [
-    "#0072B2",  # blue
-    "#D55E00",  # vermillion
-    "#009E73",  # bluish green
-    "#E69F00",  # orange
-    "#56B4E9",  # sky blue
-    "#CC79A7",  # reddish purple
-    "#000000",  # black
+    "royalblue",
+    "crimson",
+    "limegreen",
+    "darkorange",
+    "mediumpurple",
+    "deepskyblue",
+    "black",
 ]
 
 # One line style per pusher, so that curves lying on top of each other stay visible.
@@ -205,11 +205,9 @@ def orbit_xy(
         else:
             title = f"Orbit seen from above, dt = {dt:.3g} s"
         axes.set_title(title)
-        #axes.set_aspect("equal")  # a circle must look like a circle
+        # axes.set_aspect("equal")  # a circle must look like a circle
         if len(axes.get_legend_handles_labels()[0]) > 1:
             axes.legend()
-
-
 
     if save_path is not None:
         save_figure(figure, save_path)
@@ -306,8 +304,6 @@ def orbit_xz(
         axes.set_aspect("equal")  # a circle must look like a circle
         if len(axes.get_legend_handles_labels()[0]) > 1:
             axes.legend()
-
-
 
     if save_path is not None:
         save_figure(figure, save_path)
@@ -426,8 +422,8 @@ def orbit_3d(
                     "o",
                     color=line.get_color(),
                 )
-        theta = np.linspace(0,2*np.pi,100)
-        axes.plot(r0_mm*np.cos(theta),r0_mm*np.sin(theta),'--')
+        theta = np.linspace(0, 2 * np.pi, 100)
+        axes.plot(r0_mm * np.cos(theta), r0_mm * np.sin(theta), "--")
         axes.set_xlabel("x [mm]")
         axes.set_ylabel("y [mm]")
         axes.set_zlabel("z [mm]")
@@ -439,12 +435,12 @@ def orbit_3d(
         axes.set_title(title)
 
         # Equal aspect ratio: matplotlib 3D does not do this automatically.
-        #stacked = np.concatenate(all_x, axis=0).reshape(-1, 3)
-        #centre = (stacked.max(axis=0) + stacked.min(axis=0)) / 2
-        #half_range = (stacked.max(axis=0) - stacked.min(axis=0)).max() / 2
-        #axes.set_xlim(centre[0] - half_range, centre[0] + half_range)
-        #axes.set_ylim(centre[1] - half_range, centre[1] + half_range)
-        #axes.set_zlim(centre[2] - half_range, centre[2] + half_range)
+        # stacked = np.concatenate(all_x, axis=0).reshape(-1, 3)
+        # centre = (stacked.max(axis=0) + stacked.min(axis=0)) / 2
+        # half_range = (stacked.max(axis=0) - stacked.min(axis=0)).max() / 2
+        # axes.set_xlim(centre[0] - half_range, centre[0] + half_range)
+        # axes.set_ylim(centre[1] - half_range, centre[1] + half_range)
+        # axes.set_zlim(centre[2] - half_range, centre[2] + half_range)
 
         if len(axes.get_legend_handles_labels()[0]) > 1:
             axes.legend()
@@ -455,46 +451,6 @@ def orbit_3d(
         plt.show()
     return figure
 
-def visufields(
-    result_dir: str | Path,
-    pusher: str | Sequence[str] | None = None,
-    *,
-    r0: float | None = None,
-    a: float | None = None,
-) -> Figure:
-
-    N = 30
-    r = np.linspace(0,a,N)
-    phi = np.linspace(0,2*np.pi,N//2)
-
-    R, TH = np.meshgrid(r,phi)
-
-    cfg = config.load_config("configs/tokamak_custom_toroidal_boris.yaml")
-    field = fields.custom_toroidal(b0=cfg.field.b0, r0=cfg.field.r0,  q0=cfg.field.q0,  lamb=cfg.field.lamb,  b_r=cfg.field.b_r, b_theta=cfg.field.b_theta, b_phi=cfg.field.b_phi)
-
-    X = np.zeros_like(R)
-    Y = r0 + R * np.cos(TH)
-    Z = R * np.sin(TH)
-
-    x_flat = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=-1)
-    e_flat, b_flat = field(x_flat, 0.0)   # b_flat.shape == (N*N, 3)
-
-    By_plot = b_flat[:, 1].reshape(N, N//2)
-    Bz_plot = b_flat[:, 2].reshape(N, N//2)
-
-
-    fig, ax = plt.subplots()
-    ax.quiver(Y, Z, By_plot, Bz_plot, color="C0", angles='xy',
-              scale_units='xy', scale=0.5, width=.005)
-
-
-
-    phi_cercle = np.linspace(0,2*np.pi,200)
-    ax.plot(r0+(a)*np.cos(phi_cercle),(a)*np.sin(phi_cercle))
-    ax.set_aspect("equal")
-    plt.show()
-    plt.xlim(4,7)
-    return fig
 
 def energy_error(
     result_dir: str | Path,
@@ -1069,7 +1025,7 @@ def phase_space_volume(
                     linestyle=_LINE_STYLES[k % len(_LINE_STYLES)],
                     label=_curve_label(name, i, len(results), shown.shape[1]),
                 )
-        axes.axhline(rounding, color="0.6", linewidth=1.0, label="float64 rounding")
+        # axes.axhline(rounding, color="0.6", linewidth=1.0, label="float64 rounding")
         axes.set_yscale("log")
         axes.set_xlabel("t [s]")
         axes.set_ylabel(r"$|\ln(V(t)\,/\,V(0))|$")
@@ -1255,6 +1211,513 @@ def phase_error_map(
         axes.set_xlabel(r"$u / c = \gamma v / c$")
         axes.set_ylabel(r"pitch angle $\psi$ [deg]")
         axes.set_title(f"Gyration phase error per turn, {pusher}")
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.show()
+    return figure
+
+
+def _canonical_momentum_change(
+    result: Any, q: float, m: float, *, half_step: bool
+) -> NDArray[np.float64]:
+    """``|P_zeta / P_zeta0 - 1|`` of the stored states, shape ``(n_saved, n_part)``.
+
+    ``P_zeta0`` is that of the initial state ``(x^0, u^0)``. With ``half_step``,
+    each ``P_zeta`` is computed as a staggered code would, from ``x^{n+1/2}`` and
+    ``u^n`` (roadmap C5(c)); otherwise from the states ``(x^n, u^n)`` of the scheme.
+    The flux ``Psi`` is the one stored by ``run`` at these positions.
+    """
+    if "poloidal_flux" not in result:
+        raise ValueError(
+            f"The result of {result.attrs['pusher']!r} holds no poloidal flux: "
+            "P_zeta is only defined for the tokamak field ('kind: carbajal')"
+        )
+    x, u = result["x"].values, result["u"].values
+    psi = result["poloidal_flux"].values
+    p_zeta0 = diagnostics.canonical_toroidal_momentum(x[:1], u[:1], psi[:1], q, m)[0]
+    if half_step:
+        x = diagnostics.half_step_position(x, u, result.attrs["dt"])
+        psi = result["poloidal_flux_half_step"].values
+    p_zeta = diagnostics.canonical_toroidal_momentum(x, u, psi, q, m)
+    return np.abs(p_zeta / p_zeta0 - 1.0)
+
+
+def _pitch_angle_labels(result: Any) -> list[str]:
+    """Legend of each particle: its initial pitch angle, in degrees."""
+    u0, b0 = result["u"].values[0], result["b_field"].values[0]
+    labels = []
+    for i in range(u0.shape[0]):  # pitch_angle takes one field for all its particles
+        pitch = diagnostics.pitch_angle(u0[i : i + 1], b0[i])[0]
+        labels.append(rf"$\theta_0 = {np.degrees(pitch):.1f}^\circ$")
+    return labels
+
+
+def canonical_momentum_error(
+    result_dir: str | Path,
+    pusher: str | Sequence[str] | None = None,
+    *,
+    half_step: bool = False,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """
+    Draw the change of the canonical toroidal momentum ``|P_zeta / P_zeta0 - 1|``.
+
+    ``P_zeta = R u_zeta - (q / m) Psi`` (Carbajal et al. 2017, Eq. 6, per unit
+    mass) is an exact invariant in the static, axisymmetric field of
+    ``kind: carbajal`` without radiation: the curve is the error of the scheme, as
+    in Fig. 1(b) of the paper. It is computed by
+    ``diagnostics.canonical_toroidal_momentum`` from the stored ``x``, ``u`` and
+    ``Psi``. With ``half_step=True`` it is computed instead from ``x^{n+1/2}`` and
+    ``u^n``, as a staggered code measures it (roadmap C5(c)): an error of order
+    ``dt``, much larger. Logarithmic vertical axis; values below the float64
+    rounding unit (the exact 0 at ``t = 0``) are drawn at it. One curve per
+    particle, labelled with its initial pitch angle.
+
+    Parameters
+    ----------
+    result_dir : str or pathlib.Path
+        Results folder given by ``run.pusher`` for a ``carbajal`` field.
+    pusher : str or sequence of str, optional
+        Which pusher(s) of the folder to draw. Default: all of them.
+    half_step : bool, optional
+        Pair ``x^{n+1/2}`` with ``u^n``, as a staggered code. Default ``False``.
+    show : bool, optional
+        Open the figure in a window. Default ``True``.
+    save_path : str or pathlib.Path, optional
+        If given, the figure is also saved as a PNG and as a PDF (no extension).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure, square, 6 x 6 in.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no pusher is given and the folder holds no trajectories.
+    ValueError
+        If a pusher is not in the folder, or its result holds no poloidal flux
+        (a field other than ``carbajal``).
+    """
+    results = _read_selected(result_dir, pusher)
+    run_config = config.load_config(Path(result_dir) / CONFIG_FILENAME)
+    rounding = np.finfo(np.float64).eps
+    with plt.rc_context(figure_style()):
+        figure, axes = plt.subplots()
+        for k, (name, result) in enumerate(results.items()):
+            change = _canonical_momentum_change(
+                result, run_config.q, run_config.m, half_step=half_step
+            )
+            labels = _pitch_angle_labels(result)
+            for i in range(change.shape[1]):
+                label = labels[i] if len(results) == 1 else f"{name}, {labels[i]}"
+                axes.plot(
+                    result["time"].values,
+                    np.maximum(change[:, i], rounding),
+                    color=_LINE_COLORS[i % len(_LINE_COLORS)],
+                    linestyle=_LINE_STYLES[k % len(_LINE_STYLES)],
+                    linewidth=1.0,
+                    label=label,
+                )
+        axes.set_yscale("log")
+        axes.set_xlabel("t [s]")
+        axes.set_ylabel(r"$|P_\zeta(t) / P_{\zeta 0} - 1|$")
+        states = r"$(x^{n+1/2}, u^n)$" if half_step else r"$(x^n, u^n)$"
+        dt = next(iter(results.values())).attrs["dt"]
+        if len(results) == 1:
+            title = f"{next(iter(results))}, {states}, dt = {dt:.3g} s"
+        else:
+            title = f"{states}, dt = {dt:.3g} s"
+        axes.set_title(title, fontsize=13)
+        axes.legend(fontsize=11)
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.show()
+    return figure
+
+
+def canonical_momentum_convergence(
+    result_dirs: Sequence[str | Path],
+    pusher: str | Sequence[str] | None = None,
+    *,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """
+    Draw the amplitude of the error on ``P_zeta`` against the time step.
+
+    Each results folder is one run of the same case (field and initial state) with
+    its own ``dt``. For each particle, the amplitude is the largest
+    ``|P_zeta / P_zeta0 - 1|`` over the run (see ``canonical_momentum_error``),
+    computed twice: from the states ``(x^n, u^n)`` of the scheme (filled circles,
+    solid line) and from ``x^{n+1/2}`` with ``u^n``, as a staggered code such as
+    KORC (open squares, dashed line). This is the test of roadmap C5(b) and (c):
+    the first should fall as ``dt^2`` and the second as ``dt``. Grey dotted lines
+    of slopes 2 and 1 are drawn for comparison, a factor 3 below the lowest curve
+    of each kind at the largest ``dt``. One panel per pusher, logarithmic axes, the
+    legend below the panels.
+
+    Parameters
+    ----------
+    result_dirs : sequence of str or pathlib.Path
+        At least two results folders given by ``run.pusher`` for a ``carbajal``
+        field, the same case with different time steps, in any order.
+    pusher : str or sequence of str, optional
+        Which pusher(s) to draw. Default: all the pushers of the first folder.
+    show : bool, optional
+        Open the figure in a window. Default ``True``.
+    save_path : str or pathlib.Path, optional
+        If given, the figure is also saved as a PNG and as a PDF (no extension).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure, one 5 x 5.5 in panel per pusher.
+
+    Raises
+    ------
+    ValueError
+        If fewer than two folders are given, if they do not hold the same field
+        and initial state, or if a result holds no poloidal flux.
+    """
+    folders = [Path(directory) for directory in result_dirs]
+    if len(folders) < 2:
+        raise ValueError("give at least two results folders, with different dt")
+    configs = [config.load_config(folder / CONFIG_FILENAME) for folder in folders]
+    for folder, run_config in zip(folders, configs, strict=True):
+        if (run_config.field, run_config.initial) != (
+            configs[0].field,
+            configs[0].initial,
+        ):
+            raise ValueError(
+                f"{folder} does not hold the same field and initial state as "
+                f"{folders[0]}: a convergence study compares one case at several dt"
+            )
+    if pusher is None:
+        names = list_results(folders[0])
+    elif isinstance(pusher, str):
+        names = [pusher]
+    else:
+        names = list(pusher)
+
+    rounding = np.finfo(np.float64).eps
+    with plt.rc_context(figure_style()):
+        figure, panels = plt.subplots(
+            1, len(names), figsize=(5.0 * len(names), 5.5), sharey=True, squeeze=False
+        )
+        for axes, name in zip(panels[0], names, strict=True):
+            dts: list[float] = []
+            synchronised: list[np.ndarray] = []
+            staggered: list[np.ndarray] = []
+            for folder, run_config in zip(folders, configs, strict=True):
+                result = read_result(folder, name)
+                dts.append(result.attrs["dt"])
+                for half_step, store in ((False, synchronised), (True, staggered)):
+                    change = _canonical_momentum_change(
+                        result, run_config.q, run_config.m, half_step=half_step
+                    )
+                    store.append(np.max(change, axis=0))
+            order = np.argsort(dts)
+            dt = np.array(dts)[order]
+            synchronised_amplitude = np.array(synchronised)[order]  # (n_dt, n_part)
+            staggered_amplitude = np.array(staggered)[order]
+            labels = _pitch_angle_labels(read_result(folders[0], name))
+            for i, label in enumerate(labels):
+                color = _LINE_COLORS[i % len(_LINE_COLORS)]
+                axes.plot(
+                    dt,
+                    np.maximum(synchronised_amplitude[:, i], rounding),
+                    marker="o",
+                    color=color,
+                    label=label,
+                )
+                axes.plot(
+                    dt,
+                    np.maximum(staggered_amplitude[:, i], rounding),
+                    marker="s",
+                    markerfacecolor="none",
+                    linestyle="--",
+                    color=color,
+                )
+            # Guides of slopes 2 and 1, below the curves they are compared with.
+            guides = ((2, synchronised_amplitude), (1, staggered_amplitude))
+            for slope, amplitudes in guides:
+                start = np.min(amplitudes[-1]) / 3.0
+                guide = start * (dt / dt[-1]) ** slope
+                axes.plot(dt, guide, color="0.5", linestyle=":", linewidth=1.2)
+                axes.annotate(
+                    rf"$\propto \Delta t^{slope}$",
+                    (dt[1], guide[1]),
+                    textcoords="offset points",
+                    xytext=(0, -16),
+                    color="0.4",
+                    fontsize=12,
+                )
+            axes.set_xscale("log")
+            axes.set_yscale("log")
+            axes.xaxis.set_minor_formatter(NullFormatter())
+            axes.set_xlabel(r"$\Delta t$ [s]")
+            axes.set_title(name, fontsize=14)
+        panels[0][0].set_ylabel(r"$\max_n\, |P_\zeta / P_{\zeta 0} - 1|$")
+        marker_legend = [
+            Line2D([], [], color="0.2", marker="o", label=r"$(x^n, u^n)$"),
+            Line2D(
+                [],
+                [],
+                color="0.2",
+                marker="s",
+                markerfacecolor="none",
+                linestyle="--",
+                label=r"$(x^{n+1/2}, u^n)$",
+            ),
+        ]
+        angle_handles = panels[0][0].get_legend_handles_labels()[0]
+        figure.legend(
+            handles=angle_handles + marker_legend,
+            loc="outside lower center",
+            ncol=len(angle_handles) + 2,
+            fontsize=12,
+        )
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.show()
+    return figure
+
+
+def orbit_poloidal(
+    result_dir: str | Path,
+    pusher: str | Sequence[str] | None = None,
+    *,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """
+    Draw the orbits projected on a poloidal plane: height ``Z`` against ``R``.
+
+    ``R = sqrt(x^2 + y^2)`` is the distance to the vertical axis of the torus and
+    ``Z = z``: each point of the orbit is turned about that axis into one plane, as
+    in Fig. 2 of Carbajal et al. (2017). A passing electron draws a closed curve
+    around the magnetic axis, a trapped one a banana. The start of each orbit is
+    marked by a dot, and for a ``carbajal`` field the magnetic axis by a cross at
+    ``(R0, 0)``. One colour per particle, labelled with its initial pitch angle;
+    one line style per pusher. Equal scales on both axes.
+
+    Parameters
+    ----------
+    result_dir : str or pathlib.Path
+        Results folder given by ``run.pusher``.
+    pusher : str or sequence of str, optional
+        Which pusher(s) of the folder to draw. Default: all of them.
+    show : bool, optional
+        Open the figure in a window. Default ``True``.
+    save_path : str or pathlib.Path, optional
+        If given, the figure is also saved as a PNG and as a PDF (no extension).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure, square, 6 x 6 in.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no pusher is given and the folder holds no trajectories.
+    ValueError
+        If a pusher is not in the folder.
+    """
+    results = _read_selected(result_dir, pusher)
+    run_config = config.load_config(Path(result_dir) / CONFIG_FILENAME)
+    with plt.rc_context(figure_style()):
+        figure, axes = plt.subplots()
+        for k, (name, result) in enumerate(results.items()):
+            x = result["x"].values
+            major_radius = np.hypot(x[..., 0], x[..., 1])
+            labels = _pitch_angle_labels(result)
+            for i in range(x.shape[1]):
+                color = _LINE_COLORS[i % len(_LINE_COLORS)]
+                label = labels[i] if len(results) == 1 else f"{name}, {labels[i]}"
+                # Later particles drawn below: with growing pitch angles, the wide
+                # band of a large angle does not hide the thin one of a small angle.
+                axes.plot(
+                    major_radius[:, i],
+                    x[:, i, 2],
+                    color=color,
+                    linestyle=_LINE_STYLES[k % len(_LINE_STYLES)],
+                    linewidth=0.5,
+                    label=label,
+                    zorder=x.shape[1] - i,
+                )
+                axes.plot(major_radius[0, i], x[0, i, 2], "o", color=color)
+        if run_config.field.kind == "carbajal":
+            axes.plot(run_config.field.r0, 0.0, "k+", markersize=12)
+        axes.set_aspect("equal", adjustable="datalim")
+        axes.set_xlabel("R [m]")
+        axes.set_ylabel("Z [m]")
+        axes.set_title("Orbits in a poloidal plane")
+        axes.legend(fontsize=11)
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.show()
+    return figure
+
+
+def parallel_velocity(
+    result_dir: str | Path,
+    pusher: str | Sequence[str] | None = None,
+    *,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """
+    Draw the velocity along the field, ``u_par / |u|``, of each particle against time.
+
+    ``u_par = u . B / |B|``, with ``B`` the field stored by ``run`` at each saved
+    position. A passing particle keeps the sign of ``u_par``; a trapped one changes
+    it at each mirror point (roadmap C6). Each curve is labelled with the initial
+    pitch angle of its particle and with its class given by
+    ``diagnostics.is_trapped``, which holds for the duration of the run only. One
+    colour per particle, one line style per pusher.
+
+    Parameters
+    ----------
+    result_dir : str or pathlib.Path
+        Results folder given by ``run.pusher``.
+    pusher : str or sequence of str, optional
+        Which pusher(s) of the folder to draw. Default: all of them.
+    show : bool, optional
+        Open the figure in a window. Default ``True``.
+    save_path : str or pathlib.Path, optional
+        If given, the figure is also saved as a PNG and as a PDF (no extension).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure, square, 6 x 6 in.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no pusher is given and the folder holds no trajectories.
+    ValueError
+        If a pusher is not in the folder.
+    """
+    results = _read_selected(result_dir, pusher)
+    with plt.rc_context(figure_style()):
+        figure, axes = plt.subplots()
+        for k, (name, result) in enumerate(results.items()):
+            u = result["u"].values
+            b_field = result["b_field"].values
+            u_parallel = np.sum(u * b_field, axis=2) / np.linalg.norm(b_field, axis=2)
+            ratio = u_parallel / np.linalg.norm(u, axis=2)
+            trapped = diagnostics.is_trapped(u, b_field)
+            labels = _pitch_angle_labels(result)
+            for i in range(u.shape[1]):
+                kind = "trapped" if trapped[i] else "passing"
+                label = f"{labels[i]}, {kind}"
+                if len(results) > 1:
+                    label = f"{name}, {label}"
+                axes.plot(
+                    result["time"].values,
+                    ratio[:, i],
+                    color=_LINE_COLORS[i % len(_LINE_COLORS)],
+                    linestyle=_LINE_STYLES[k % len(_LINE_STYLES)],
+                    linewidth=1.0,
+                    label=label,
+                )
+        axes.axhline(0.0, color="0.5", linewidth=0.8)
+        axes.set_xlabel("t [s]")
+        axes.set_ylabel(r"$u_\parallel / |u|$")
+        axes.set_title("Velocity along the field")
+        axes.legend(fontsize=11)
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.show()
+    return figure
+
+
+def poincare_section(
+    result_dir: str | Path,
+    pusher: str | Sequence[str] | None = None,
+    *,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """
+    Draw the Poincare section of the orbits, ``u_y / c`` against ``y``, per pusher.
+
+    The points are the states where an orbit crosses the plane ``x = 0`` towards
+    ``x > 0``, interpolated linearly between two saved states
+    (``diagnostics.poincare_section``), as in Figs. 1 and 2 of Higuera and Cary
+    (2017) for roadmap C7. In the field ``fields.higuera_cary_shear``,
+    ``u_y = p_y / m``, and an exact orbit draws a closed curve; the curves of
+    different particles are nested. One colour per particle (ten colours, then
+    repeated), labelled with its initial ``u_y / c``; one panel per pusher. The
+    states must be saved at every step (``save_every: 1``) for the interpolation
+    error to stay of the order of that of the scheme.
+
+    Parameters
+    ----------
+    result_dir : str or pathlib.Path
+        Results folder given by ``run.pusher``.
+    pusher : str or sequence of str, optional
+        Which pusher(s) of the folder to draw. Default: all of them.
+    show : bool, optional
+        Open the figure in a window. Default ``True``.
+    save_path : str or pathlib.Path, optional
+        If given, the figure is also saved as a PNG and as a PDF (no extension).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure, one square panel of 6 x 6 in per pusher, with shared axes.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no pusher is given and the folder holds no trajectories.
+    ValueError
+        If a pusher is not in the folder.
+    """
+    results = _read_selected(result_dir, pusher)
+    with plt.rc_context(figure_style()):
+        figure, panels = plt.subplots(
+            1,
+            len(results),
+            figsize=(6.0 * len(results), 6.0),
+            sharex=True,
+            sharey=True,
+            squeeze=False,
+        )
+        for axes, (name, result) in zip(panels[0], results.items(), strict=True):
+            u = result["u"].values
+            particle, _, x_cross, u_cross = diagnostics.poincare_section(
+                result["time"].values, result["x"].values, u
+            )
+            for i in range(u.shape[1]):
+                mine = particle == i
+                axes.plot(
+                    x_cross[mine, 1],
+                    u_cross[mine, 1] / c,
+                    ".",
+                    markersize=1.5,
+                    color=plt.get_cmap("tab10")(i % 10),
+                    label=rf"$u_{{y,0}} / c = {u[0, i, 1] / c:.3f}$",
+                )
+            axes.set_xlabel("y [m]")
+            axes.set_title(rf"{name}, $\Delta t$ = {result.attrs['dt']:.3g} s")
+        panels[0, 0].set_ylabel(r"$u_y / c$")
+        panels[0, -1].legend(fontsize=9, markerscale=6)
 
     if save_path is not None:
         save_figure(figure, save_path)

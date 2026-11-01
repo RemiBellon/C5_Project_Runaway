@@ -642,6 +642,250 @@ def magnetic_moment(
     return m * u_perp_squared / (2.0 * b_norm)
 
 
+def is_trapped(
+    u: NDArray[np.float64], b_field: NDArray[np.float64]
+) -> NDArray[np.bool_]:
+    """Whether each particle reversed its motion along the field during the run.
+
+    A trapped particle bounces between two mirror points, where its velocity
+    parallel to ``B`` changes sign; a passing particle keeps the sign of ``u_par``
+    for ever (roadmap C6). A particle is classified as trapped if ``u_par = u . b``
+    takes both strictly positive and strictly negative values among the saved
+    states. ``u . B`` has the sign of ``u_par`` and is used instead: no division by
+    ``|B|`` is needed.
+
+    Parameters
+    ----------
+    u : ndarray, shape (n_saved, n_part, 3)
+        Proper velocities [m/s] of the saved states, at least two.
+    b_field : ndarray, shape (n_saved, n_part, 3)
+        Magnetic field [T] at the positions of the particles, at the same times as
+        ``u`` (``b_field`` of the results files).
+
+    Returns
+    -------
+    ndarray of bool, shape (n_part,)
+        ``True`` for the particles that reversed at least once.
+
+    Raises
+    ------
+    ValueError
+        If the shapes differ or fewer than two states are given, or ``|B| = 0``
+        somewhere (no parallel direction then).
+
+    Notes
+    -----
+    The answer holds for the duration of the run only: a trapped particle is
+    recognised once it has reached its first mirror point, and the run must also
+    be long enough for a passing one to cross the strongest field on its orbit.
+    A reversal shorter than the interval between two saved states is missed.
+    ``u_par`` is taken at the particle and not at its guiding centre: its
+    oscillation at the gyration frequency, of relative size ``r_L / L``, can add
+    reversals to a passing particle whose ``u_par`` comes within that size of 0.
+    """
+    u = np.asarray(u, dtype=np.float64)
+    b_field = np.asarray(b_field, dtype=np.float64)
+    if u.ndim != 3 or u.shape[2] != 3 or b_field.shape != u.shape:
+        raise ValueError(
+            "u and b_field must have the same shape (n_saved, n_part, 3); "
+            f"got {u.shape} and {b_field.shape}"
+        )
+    if u.shape[0] < 2:
+        raise ValueError(
+            f"At least two saved states are needed to see a reversal; got {u.shape[0]}"
+        )
+    if np.any(np.all(b_field == 0.0, axis=2)):
+        raise ValueError("|B| = 0 at some point: the parallel direction is not defined")
+
+    u_dot_b = np.sum(u * b_field, axis=2)
+    return np.any(u_dot_b > 0.0, axis=0) & np.any(u_dot_b < 0.0, axis=0)
+
+
+def canonical_toroidal_momentum(
+    x: NDArray[np.float64],
+    u: NDArray[np.float64],
+    psi: NDArray[np.float64],
+    q: float,
+    m: float,
+) -> NDArray[np.float64]:
+    """Canonical toroidal momentum per unit mass ``P_zeta = R u_zeta - (q / m) Psi``.
+
+    ``R`` is the distance to the vertical axis and ``u_zeta = u . e_zeta`` the
+    toroidal component of the proper velocity, with ``zeta`` turning clockwise
+    (OPEN_POINTS N2). This is Carbajal et al. (2017, Eq. 6) divided by ``m``, with
+    the sign of the flux term of the paper (OPEN_POINTS N1). In a static,
+    axisymmetric field without radiation it is an exact invariant of the motion.
+
+    Since ``e_zeta = (y, -x, 0) / R``, ``R u_zeta = y u_x - x u_y``: minus the
+    vertical component of ``x x u``. This needs neither the major radius nor the
+    angles, and holds for any axisymmetric field about the vertical axis.
+
+    Parameters
+    ----------
+    x : ndarray, shape (n_saved, n_part, 3)
+        Positions [m].
+    u : ndarray, shape (n_saved, n_part, 3)
+        Proper velocities ``u = gamma v`` [m/s], at the same times as ``x``. With
+        the synchronised step of the pushers, ``x^n`` and ``u^n`` are taken as
+        they are: mixing ``x^{n+1/2}`` with ``u^n`` is a first-order error.
+    psi : ndarray, shape (n_saved, n_part)
+        Poloidal flux function [T m^2] at the positions ``x``, for example
+        ``fields.carbajal_poloidal_flux`` of their minor radius.
+    q : float
+        Signed charge [C], finite and not zero, for example ``-e``.
+    m : float
+        Rest mass [kg], finite and strictly positive.
+
+    Returns
+    -------
+    ndarray, shape (n_saved, n_part)
+        ``P_zeta`` [m^2/s].
+
+    Raises
+    ------
+    ValueError
+        If the shapes do not match, ``q`` is zero or not finite, or ``m`` is not
+        finite and strictly positive.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    u = np.asarray(u, dtype=np.float64)
+    psi = np.asarray(psi, dtype=np.float64)
+    if x.ndim != 3 or x.shape[2] != 3 or u.shape != x.shape or psi.shape != x.shape[:2]:
+        raise ValueError(
+            "x and u must have the same shape (n_saved, n_part, 3) and psi the shape "
+            f"(n_saved, n_part); got {x.shape}, {u.shape} and {psi.shape}"
+        )
+    if not np.isfinite(q) or q == 0.0:
+        raise ValueError(f"q must be a finite, non-zero charge [C], got {q!r}")
+    if not np.isfinite(m) or m <= 0.0:
+        raise ValueError(f"m must be a finite, strictly positive mass [kg], got {m!r}")
+
+    r_times_u_zeta = x[:, :, 1] * u[:, :, 0] - x[:, :, 0] * u[:, :, 1]
+    return r_times_u_zeta - (q / m) * psi
+
+
+def half_step_position(
+    x: NDArray[np.float64], u: NDArray[np.float64], dt: float
+) -> NDArray[np.float64]:
+    """Position ``x^{n+1/2} = x^n + (dt / 2) u^n / gamma^n`` after the first half drift.
+
+    It is the point where the synchronised step reads the fields (``integrate``,
+    Ripperda et al. 2018, Eq. 5). It is not a state of the scheme: pairing it with
+    ``u^n`` in a diagnostic mixes two times half a step apart, which is a
+    first-order error. That is what a staggered code such as KORC does when it
+    evaluates ``P_zeta`` from its positions and velocities (roadmap C5(c)); this
+    function exists to measure that error, never to correct a diagnostic.
+
+    Parameters
+    ----------
+    x : ndarray, shape (..., 3)
+        Positions ``x^n`` [m].
+    u : ndarray, shape (..., 3)
+        Proper velocities ``u^n = gamma v`` [m/s], at the same times as ``x``.
+    dt : float
+        Time step of the run [s], finite and strictly positive.
+
+    Returns
+    -------
+    ndarray, shape (..., 3)
+        Positions ``x^{n+1/2}`` [m].
+
+    Raises
+    ------
+    ValueError
+        If ``x`` and ``u`` do not have the same shape ``(..., 3)``, or ``dt`` is not
+        finite and strictly positive.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    u = np.asarray(u, dtype=np.float64)
+    if x.ndim == 0 or x.shape[-1] != 3 or u.shape != x.shape:
+        raise ValueError(
+            f"x and u must have the same shape (..., 3); got {x.shape} and {u.shape}"
+        )
+    if not np.isfinite(dt) or dt <= 0.0:
+        raise ValueError(f"dt must be a finite, strictly positive time [s], got {dt!r}")
+
+    gamma = np.sqrt(1.0 + np.sum(u**2, axis=-1, keepdims=True) / c**2)
+    return x + 0.5 * dt * u / gamma
+
+
+def poincare_section(
+    t: NDArray[np.float64], x: NDArray[np.float64], u: NDArray[np.float64]
+) -> tuple[
+    NDArray[np.intp], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]
+]:
+    """States where the particles cross the plane ``x = 0`` towards ``x > 0``.
+
+    This is the surface of section of Higuera and Cary (2017, Sec. VI; roadmap C7):
+    the plane ``x = 0`` crossed with ``p_x > 0``. A crossing is a pair of
+    successive saved states with ``x_k < 0 <= x_{k+1}``; the time, position and
+    proper velocity at ``x = 0`` are interpolated linearly between them, with the
+    weight ``w = -x_k / (x_{k+1} - x_k)`` in ``(0, 1]``. A state that starts exactly
+    on the plane is not a crossing. Each particle can cross any number of times,
+    zero included, so the crossings of all particles are returned one after the
+    other, with the index of their particle.
+
+    Parameters
+    ----------
+    t : ndarray, shape (n_saved,)
+        Times of the saved states [s], strictly increasing, at least two.
+    x : ndarray, shape (n_saved, n_part, 3)
+        Positions [m].
+    u : ndarray, shape (n_saved, n_part, 3)
+        Proper velocities ``u = gamma v`` [m/s], at the same times as ``x``
+        (synchronised states ``(x^n, u^n)`` of the pushers).
+
+    Returns
+    -------
+    particle : ndarray of int, shape (n_cross,)
+        Index of the particle of each crossing; crossings are sorted by particle,
+        then by time.
+    t_cross : ndarray, shape (n_cross,)
+        Times of the crossings [s].
+    x_cross : ndarray, shape (n_cross, 3)
+        Positions at the crossings [m]; their ``x`` component is 0 up to rounding.
+    u_cross : ndarray, shape (n_cross, 3)
+        Proper velocities at the crossings [m/s].
+
+    Raises
+    ------
+    ValueError
+        If the shapes do not match, fewer than two states are given, or ``t`` is
+        not strictly increasing.
+
+    Notes
+    -----
+    Linear interpolation adds an error of order ``(t_{k+1} - t_k)^2`` to the
+    crossing states: the states must be saved at every step (``save_every: 1``)
+    for this error to stay of the order of that of the scheme. With
+    ``A = A_z(y) z_hat``, as in the paper, the canonical momentum ``p_y`` is the
+    kinetic one: ``p_y / m = u_y``.
+    """
+    t = np.asarray(t, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+    u = np.asarray(u, dtype=np.float64)
+    if x.ndim != 3 or x.shape[2] != 3 or u.shape != x.shape or t.shape != (x.shape[0],):
+        raise ValueError(
+            "t must have shape (n_saved,) and x and u the shape (n_saved, n_part, 3); "
+            f"got {t.shape}, {x.shape} and {u.shape}"
+        )
+    if t.size < 2:
+        raise ValueError(f"At least two saved states are needed; got {t.size}")
+    if np.any(np.diff(t) <= 0.0):
+        raise ValueError("t must be strictly increasing")
+
+    before = x[:-1, :, 0]
+    after = x[1:, :, 0]
+    # Transposed so that np.nonzero lists the crossings by particle, then by time.
+    particle, k = np.nonzero(((before < 0.0) & (after >= 0.0)).T)
+    weight = -before[k, particle] / (after[k, particle] - before[k, particle])
+    t_cross = t[k] + weight * (t[k + 1] - t[k])
+    weight = weight[:, np.newaxis]
+    x_cross = x[k, particle] + weight * (x[k + 1, particle] - x[k, particle])
+    u_cross = u[k, particle] + weight * (u[k + 1, particle] - u[k, particle])
+    return particle, t_cross, x_cross, u_cross
+
+
 def step_jacobian_determinant(
     push: Pusher,
     field: Field,

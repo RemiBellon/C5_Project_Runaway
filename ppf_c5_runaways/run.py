@@ -7,7 +7,7 @@ import numpy as np
 
 from ppf_c5_runaways import fields
 from ppf_c5_runaways.config import load_config
-from ppf_c5_runaways.diagnostics import step_jacobian_determinant
+from ppf_c5_runaways.diagnostics import half_step_position, step_jacobian_determinant
 from ppf_c5_runaways.integrate import integrate
 from ppf_c5_runaways.io import (
     CONFIG_FILENAME,
@@ -32,6 +32,11 @@ def pusher(
     measured (``diagnostics.step_jacobian_determinant``) and stored, for
     ``plotting.phase_space_volume``. It needs ``save_every: 1`` (the volume change of
     the run is the product over all the steps) and costs about 12 times the run.
+
+    For the tokamak field of Carbajal et al. (``kind: carbajal``), the poloidal flux
+    ``Psi`` is also stored at the saved positions ``x^n`` and at ``x^{n+1/2}``
+    (``io.write_result``), so that ``P_zeta`` can be computed from the results
+    folder alone, as it is and as a staggered code would measure it.
     """
     config = load_config(config_path)
     push = get_pusher(config.pusher)  # fails first if the pusher does not exist
@@ -69,17 +74,22 @@ def pusher(
             b_field=config.field.b_field, e_field=config.field.e_field
         )
     elif config.field.kind == "mirror":
-        field = fields.magnetic_mirror(
-            b0=config.field.b0, length=config.field.length
+        field = fields.magnetic_mirror(b0=config.field.b0, length=config.field.length)
+    elif config.field.kind == "carbajal":
+        field = fields.carbajal(
+            b0=config.field.b0,
+            r0=config.field.r0,
+            q0=config.field.q0,
+            lam=config.field.lam,
+            e0=config.field.e0,
         )
-    elif config.field.kind == "tokamak":
-        field = fields.custom_toroidal(b0=config.field.b0, r0=config.field.r0,
-                                       q0=config.field.q0,  lamb=config.field.lamb,  b_r=config.field.b_r,
-                                       b_theta=config.field.b_theta, b_phi=config.field.b_phi)
+    elif config.field.kind == "higuera_cary_shear":
+        field = fields.higuera_cary_shear(a=config.field.a, b=config.field.b)
     else:
         raise ValueError(
             f"The field kind {config.field.kind!r} has no field function yet. "
-            "Available: 'uniform_cartesian', 'mirror', 'tokamak'."
+            "Available: 'uniform_cartesian', 'mirror', 'carbajal', "
+            "'higuera_cary_shear'."
         )
     t, x, u = integrate(
         x0=np.array(config.initial.x0),
@@ -104,6 +114,22 @@ def pusher(
             push, field, t, x, u, config.dt, config.q, config.m
         )
 
+    # Poloidal flux at x^n, for P_zeta, and at x^{n+1/2}, for the error of a
+    # diagnostic that pairs x^{n+1/2} with u^n (roadmap C5(c)).
+    poloidal_flux = None
+    poloidal_flux_half_step = None
+    if config.field.kind == "carbajal":
+        profile = {
+            "b0": config.field.b0,
+            "q0": config.field.q0,
+            "lam": config.field.lam,
+        }
+        r = fields.cartesian_to_toroidal(x, config.field.r0)[0]
+        poloidal_flux = fields.carbajal_poloidal_flux(r, **profile)
+        x_half = half_step_position(x, u, config.dt)
+        r_half = fields.cartesian_to_toroidal(x_half, config.field.r0)[0]
+        poloidal_flux_half_step = fields.carbajal_poloidal_flux(r_half, **profile)
+
     created = result_dir is None
     if result_dir is None:
         result_dir = create_result_dir(base_dir, config)
@@ -117,6 +143,8 @@ def pusher(
             config.dt,
             b_field=b_field,
             step_jacobian_determinant=step_determinant,
+            poloidal_flux=poloidal_flux,
+            poloidal_flux_half_step=poloidal_flux_half_step,
         )
     except BaseException:
         if created:
