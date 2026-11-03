@@ -24,6 +24,7 @@ def new_config(
     seed: int = 42,
     q: float = -e,
     m: float = m_e,
+    rr_scale: float = 0.0,
     directory: str | Path = "configs",
 ) -> Path:
     """Write a new ``.yaml`` run configuration and return its path.
@@ -66,6 +67,9 @@ def new_config(
         Signed charge [C]. The default is an electron.
     m : float, default m_e
         Rest mass [kg]. The default is an electron.
+    rr_scale : float, default 0.0
+        Factor on the radiation reaction force, finite and ``>= 0``: ``0`` leaves
+        out radiation, ``1`` is the physical force (see ``config.RunConfig``).
     directory : str or pathlib.Path, default "configs"
         Folder of the new file, relative to the current working directory unless
         absolute. It is created if missing.
@@ -127,6 +131,7 @@ def new_config(
             "seed": seed,
             "q": q,
             "m": m,
+            "rr_scale": rr_scale,
             "field": dict(field),
             "initial": {"x0": particles["x0"], "u0": particles["u0"]},
         }

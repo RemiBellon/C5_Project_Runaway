@@ -219,6 +219,8 @@ def write_result(
     step_jacobian_determinant: NDArray[np.float64] | None = None,
     poloidal_flux: NDArray[np.float64] | None = None,
     poloidal_flux_half_step: NDArray[np.float64] | None = None,
+    quantum_parameter: NDArray[np.float64] | None = None,
+    landau_lifshitz_parameter: NDArray[np.float64] | None = None,
 ) -> None:
     """Store the trajectories of one pusher in the results folder ``run_dir``.
 
@@ -271,6 +273,15 @@ def write_result(
         The same at ``x^{n+1/2}`` (``diagnostics.half_step_position``), to measure
         the error of a diagnostic that pairs it with ``u^n`` (roadmap C5(c)).
         Stored only together with ``poloidal_flux``.
+    quantum_parameter : ndarray, shape (n_saved, n_part), optional
+        Quantum parameter ``chi`` at each saved state
+        (``radiation.quantum_parameter``), dimensionless. Given by ``run`` for a
+        run with radiation (roadmap D5).
+    landau_lifshitz_parameter : ndarray, shape (n_saved, n_part), optional
+        Validity parameter ``eta`` of the Landau-Lifshitz force at each saved
+        state, with the ``rr_scale`` of the run
+        (``radiation.landau_lifshitz_parameter``), dimensionless. Given by ``run``
+        for a run with radiation (roadmap D5).
 
     Raises
     ------
@@ -334,6 +345,20 @@ def write_result(
                 f"got {flux.shape}"
             )
         fluxes[name] = flux
+    validity = {}
+    for name, parameter in (
+        ("quantum_parameter", quantum_parameter),
+        ("landau_lifshitz_parameter", landau_lifshitz_parameter),
+    ):
+        if parameter is None:
+            continue
+        parameter = np.asarray(parameter)
+        if parameter.shape != x.shape[:2]:
+            raise ValueError(
+                f"{name} must have shape (n_saved, n_part) = {x.shape[:2]}; "
+                f"got {parameter.shape}"
+            )
+        validity[name] = parameter
 
     data_path = run_dir / DATA_FILENAME
     existed = data_path.exists()
@@ -377,6 +402,18 @@ def write_result(
             ("time", "particle"),
             flux,
             {"units": "T m^2", "meaning": meanings[name]},
+        )
+    validity_meanings = {
+        "quantum_parameter": "chi = E_rest / E_S at x[i], u[i] (roadmap D5)",
+        "landau_lifshitz_parameter": (
+            "eta = rr_scale tau_0 |q| E_rest / (m c) at x[i], u[i] (roadmap D5)"
+        ),
+    }
+    for name, parameter in validity.items():
+        dataset[name] = (
+            ("time", "particle"),
+            parameter,
+            {"units": "1", "meaning": validity_meanings[name]},
         )
     try:
         dataset.to_netcdf(data_path, mode="a", group=pusher_name, engine="h5netcdf")

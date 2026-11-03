@@ -1,5 +1,6 @@
 """Time integrators for the motion of charged particles: one step of a pusher."""
 
+import functools
 from collections.abc import Callable
 from numbers import Real
 
@@ -8,6 +9,7 @@ from numpy.typing import NDArray
 
 from ppf_c5_runaways.constants import c
 from ppf_c5_runaways.fields import Field
+from ppf_c5_runaways.radiation import landau_lifshitz_force
 
 # The interface shared by all pushers: push(x, u, field, t, dt, q, m) -> (x_new, u_new).
 type Pusher = Callable[
@@ -26,6 +28,7 @@ def _check_push_arguments(
     dt: float,
     q: float,
     m: float,
+    rr_scale: float = 0.0,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Check the arguments of a pusher, before anything is computed.
 
@@ -35,7 +38,7 @@ def _check_push_arguments(
 
     Parameters
     ----------
-    x, u, t, dt, q, m
+    x, u, t, dt, q, m, rr_scale
         The arguments of a pusher, see ``boris``.
 
     Returns
@@ -47,9 +50,9 @@ def _check_push_arguments(
     ------
     ValueError
         If ``x`` or ``u`` does not have shape ``(n_part, 3)``, if ``u`` and ``x``
-        differ in shape, or if ``t``, ``dt``, ``q`` or ``m`` is not a finite real
-        number in its range. The message says what was expected and what was
-        received.
+        differ in shape, or if ``t``, ``dt``, ``q``, ``m`` or ``rr_scale`` is not a
+        finite real number in its range. The message says what was expected and
+        what was received.
     """
     x = np.asarray(x, dtype=np.float64)
     u = np.asarray(u, dtype=np.float64)
@@ -77,7 +80,30 @@ def _check_push_arguments(
         raise ValueError(
             f"m must be a finite, strictly positive number [kg], got {m!r}"
         )
+    _check_rr_scale(rr_scale)
     return x, u
+
+
+def _check_rr_scale(rr_scale: float) -> None:
+    """Refuse a factor on the radiation force that is not a finite number ``>= 0``.
+
+    Raises
+    ------
+    ValueError
+        If ``rr_scale`` is negative, not finite, a bool or not a real number. A
+        bool is a ``Real`` in Python: it is refused, so that ``True`` is not read
+        as "radiation on".
+    """
+    if (
+        isinstance(rr_scale, bool)
+        or not isinstance(rr_scale, Real)
+        or not np.isfinite(rr_scale)
+        or rr_scale < 0.0
+    ):
+        raise ValueError(
+            "rr_scale must be a finite number >= 0 (0 leaves out radiation, 1 is "
+            f"the physical force), got {rr_scale!r}"
+        )
 
 
 def _evaluate_field(
@@ -164,6 +190,216 @@ def _gamma_from_quartic(
     return np.sqrt(gamma_squared)
 
 
+# --- the synchronized step and the velocity update of each scheme -----------------
+
+# A velocity update u^n -> u^{n+1}: (u, E, B, dt, q, m) -> u_new, with E and B taken
+# at the middle of the step. It is the only part in which the three schemes differ.
+type _VelocityUpdate = Callable[
+    [
+        NDArray[np.float64],
+        NDArray[np.float64],
+        NDArray[np.float64],
+        float,
+        float,
+        float,
+    ],
+    NDArray[np.float64],
+]
+
+
+def _synchronized_step(
+    x: NDArray[np.float64],
+    u: NDArray[np.float64],
+    field: Field,
+    t: float,
+    dt: float,
+    q: float,
+    m: float,
+    velocity_update: _VelocityUpdate,
+    rr_scale: float = 0.0,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """One synchronized step, around the velocity update of a scheme.
+
+    The step of Ripperda et al. (2018, Eqs. 5-8), shared by ``boris``,
+    ``higuera_cary`` and ``vay``, with the radiation reaction added as Tamburini
+    et al. (2010, Eqs. 11-12) and Carbajal et al. (2017, Eqs. A6-A7) do::
+
+        x_half = x + (dt / 2) u / gamma(u)                first half of the move
+        E, B = field(x_half, t + dt / 2)                  the only field evaluation
+        u_L = velocity_update(u, E, B, dt, q, m)          the scheme (Lorentz force)
+        u_mid = (u + u_L) / 2                             momentum of mid-step
+        u_new = u_L + rr_scale dt F_R(u_mid, E, B) / m    radiation reaction
+        x_new = x_half + (dt / 2) u_new / gamma(u_new)    second half of the move
+
+    With ``rr_scale = 0`` the radiation line is skipped, so the step is the
+    Lorentz step alone, bit for bit.
+
+    Parameters
+    ----------
+    x, u, field, t, dt, q, m, rr_scale
+        The arguments of a pusher, see ``boris``.
+    velocity_update : callable
+        ``(u, E, B, dt, q, m) -> u_new`` [m/s], the update of the proper velocity
+        by the scheme, with the fields of the middle of the step.
+
+    Returns
+    -------
+    x_new, u_new : ndarray, shape (n_part, 3)
+        Positions [m] and proper velocities [m/s] at ``t + dt``, new arrays.
+
+    Raises
+    ------
+    ValueError
+        As ``boris``.
+    """
+    x, u = _check_push_arguments(x, u, t, dt, q, m, rr_scale)
+
+    x_half = x + 0.5 * dt * u / _lorentz_factor(u)
+    e_field, b_field = _evaluate_field(field, x_half, t + 0.5 * dt)
+    u_new = velocity_update(u, e_field, b_field, dt, q, m)
+    if rr_scale != 0.0:
+        # The momentum of mid-step is estimated without F_R (Tamburini Eq. 12): the
+        # coupling error is O(dt F_R) on it, measured by roadmap test D3.
+        u_middle = 0.5 * (u + u_new)
+        radiation_force = landau_lifshitz_force(u_middle, e_field, b_field, q, m)
+        u_new = u_new + rr_scale * dt / m * radiation_force
+    x_new = x_half + 0.5 * dt * u_new / _lorentz_factor(u_new)
+    return x_new, u_new
+
+
+def _boris_velocity(
+    u: NDArray[np.float64],
+    e_field: NDArray[np.float64],
+    b_field: NDArray[np.float64],
+    dt: float,
+    q: float,
+    m: float,
+) -> NDArray[np.float64]:
+    """Velocity update of the Boris scheme (Ripperda et al. 2018, Eqs. 10-12).
+
+    Half acceleration by E, rotation by B with ``gamma-``, half acceleration by E;
+    the formulas are in the Notes of ``boris``.
+
+    Parameters
+    ----------
+    u : ndarray, shape (n_part, 3)
+        Proper velocities ``u^n`` [m/s].
+    e_field, b_field : ndarray, shape (n_part, 3)
+        Electric [V/m] and magnetic [T] fields at the middle of the step.
+    dt, q, m
+        Time step [s], signed charge [C] and rest mass [kg], already checked.
+
+    Returns
+    -------
+    ndarray, shape (n_part, 3)
+        Proper velocities ``u^{n+1}`` [m/s].
+    """
+    # Half acceleration by E, shape (n_part, 3) [m/s].
+    half_kick = q * dt / (2.0 * m) * e_field
+    u_minus = u + half_kick
+
+    # Rotation by B. gamma_minus has shape (n_part, 1) so that it broadcasts on the
+    # 3 components. tvec and svec are t and s of Ripperda et al. (2018).
+    gamma_minus = _lorentz_factor(u_minus)
+    tvec = q * dt / (2.0 * m) * b_field / gamma_minus
+    svec = 2.0 * tvec / (1.0 + np.sum(tvec**2, axis=1, keepdims=True))
+    u_prime = u_minus + np.cross(u_minus, tvec)
+    u_plus = u_minus + np.cross(u_prime, svec)
+
+    return u_plus + half_kick
+
+
+def _higuera_cary_velocity(
+    u: NDArray[np.float64],
+    e_field: NDArray[np.float64],
+    b_field: NDArray[np.float64],
+    dt: float,
+    q: float,
+    m: float,
+) -> NDArray[np.float64]:
+    """Velocity update of the Higuera-Cary scheme (Higuera & Cary 2017).
+
+    The Boris update with ``gamma_new`` of Eq. 20 in place of ``gamma-`` in the
+    rotation; the formulas are in the Notes of ``higuera_cary``.
+
+    Parameters
+    ----------
+    u, e_field, b_field, dt, q, m
+        As ``_boris_velocity``.
+
+    Returns
+    -------
+    ndarray, shape (n_part, 3)
+        Proper velocities ``u^{n+1}`` [m/s].
+    """
+    half_kick = q * dt / (2.0 * m) * e_field  # eps, Eq. 10
+    u_minus = u + half_kick  # Eq. 18
+    beta = q * dt / (2.0 * m) * b_field  # Eq. 16, dimensionless
+
+    # Lorentz factor of the rotation: positive root of Eq. 20 (see _gamma_from_quartic).
+    gamma_minus_squared = 1.0 + np.sum(u_minus**2, axis=1, keepdims=True) / c**2
+    beta_squared = np.sum(beta**2, axis=1, keepdims=True)
+    beta_dot_u = np.sum(beta * u_minus, axis=1, keepdims=True)
+    gamma_new = _gamma_from_quartic(
+        a=gamma_minus_squared - beta_squared,
+        b=beta_squared + (beta_dot_u / c) ** 2,
+    )
+
+    # Rotation by B: the Boris rotation, with gamma_new in place of gamma-.
+    tvec = beta / gamma_new
+    svec = 2.0 * tvec / (1.0 + np.sum(tvec**2, axis=1, keepdims=True))
+    u_prime = u_minus + np.cross(u_minus, tvec)
+    u_plus = u_minus + np.cross(u_prime, svec)
+
+    return u_plus + half_kick
+
+
+def _vay_velocity(
+    u: NDArray[np.float64],
+    e_field: NDArray[np.float64],
+    b_field: NDArray[np.float64],
+    dt: float,
+    q: float,
+    m: float,
+) -> NDArray[np.float64]:
+    """Velocity update of the Vay scheme (Vay 2008, Eqs. 9-12).
+
+    Electric kick and rotation with the old velocity, then the exact solution of
+    the implicit rotation with the new one; the formulas are in the Notes of
+    ``vay``.
+
+    Parameters
+    ----------
+    u, e_field, b_field, dt, q, m
+        As ``_boris_velocity``.
+
+    Returns
+    -------
+    ndarray, shape (n_part, 3)
+        Proper velocities ``u^{n+1}`` [m/s].
+    """
+    half_kick = q * dt / (2.0 * m) * e_field  # eps
+    tau = q * dt / (2.0 * m) * b_field  # dimensionless
+
+    # First half: the electric kick, plus the magnetic rotation with the *old*
+    # velocity v = u / gamma. Eq. 9.
+    u_prime = u + 2.0 * half_kick + np.cross(u / _lorentz_factor(u), tau)
+
+    # Lorentz factor at the end of the step: positive root of Eq. 11.
+    gamma_prime_squared = 1.0 + np.sum(u_prime**2, axis=1, keepdims=True) / c**2
+    tau_squared = np.sum(tau**2, axis=1, keepdims=True)
+    u_star = np.sum(u_prime * tau, axis=1, keepdims=True) / c
+    gamma_new = _gamma_from_quartic(
+        a=gamma_prime_squared - tau_squared, b=tau_squared + u_star**2
+    )
+
+    # Second half: solve the implicit magnetic rotation. Eq. 12.
+    tvec = tau / gamma_new
+    scale = 1.0 / (1.0 + np.sum(tvec**2, axis=1, keepdims=True))
+    u_dot_t = np.sum(u_prime * tvec, axis=1, keepdims=True)
+    return scale * (u_prime + u_dot_t * tvec + np.cross(u_prime, tvec))
+
+
 # --- the pushers -----------------------------------------------------------------
 
 
@@ -175,6 +411,8 @@ def boris(
     dt: float,
     q: float,
     m: float,
+    *,
+    rr_scale: float = 0.0,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Advance the particles by one time step with the classic Boris scheme.
 
@@ -202,6 +440,13 @@ def boris(
         sense of gyration, so it is never replaced by an absolute value.
     m : float
         Rest mass [kg], strictly positive.
+    rr_scale : float, optional, keyword only
+        Factor [dimensionless] on the radiation reaction force, finite and
+        ``>= 0``. ``0`` (the default) leaves out radiation: the step is then the
+        Lorentz step alone, bit for bit. ``1`` is the physical Landau-Lifshitz force
+        of ``radiation.landau_lifshitz_force``. A larger value speeds up the
+        radiative evolution, as if ``tau_0`` were ``rr_scale * tau_0``
+        (roadmap D1, D3).
 
     Returns
     -------
@@ -217,8 +462,8 @@ def boris(
     ValueError
         If ``x`` or ``u`` does not have shape ``(n_part, 3)``, if ``u`` and ``x``
         differ in shape, if the field returns arrays of another shape, or if
-        ``t``, ``dt``, ``q`` or ``m`` is not a finite real number in its range. The
-        message says what was expected and what was received.
+        ``t``, ``dt``, ``q``, ``m`` or ``rr_scale`` is not a finite real number in
+        its range. The message says what was expected and what was received.
 
     Notes
     -----
@@ -231,36 +476,19 @@ def boris(
         tvec = q dt B / (2 m gamma-)                 (called ``t`` by Ripperda)
         svec = 2 tvec / (1 + |tvec|^2)               (called ``s`` by Ripperda)
         u+ = u- + (u- + u- x tvec) x svec            rotation by B, |u+| = |u-|
-        u_new = u+ + a                               half acceleration by E
+        u_L = u+ + a                                 half acceleration by E
+        u_new = u_L + rr_scale dt F_R((u + u_L) / 2, E, B) / m    radiation
         x_new = x_half + (dt / 2) u_new / gamma(u_new)    second half of the move
 
-    The step is symmetric in time: applying it with ``-dt`` to ``(x_new, u_new)`` at
-    ``t + dt`` gives back ``(x, u)``, up to rounding.
+    The radiation line is that of Tamburini et al. (2010, Eqs. 11-12) and
+    Carbajal et al. (2017, Eqs. A6-A7), with ``F_R`` at ``x_half`` and the fields of
+    the Lorentz step; it is skipped when ``rr_scale = 0``.
+
+    Without radiation the step is symmetric in time: applying it with ``-dt`` to
+    ``(x_new, u_new)`` at ``t + dt`` gives back ``(x, u)``, up to rounding. With
+    radiation it is not, since the force is dissipative.
     """
-    x, u = _check_push_arguments(x, u, t, dt, q, m)
-
-    # First half of the move, with the velocity at the start of the step.
-    x_half = x + 0.5 * dt * u / _lorentz_factor(u)
-    e_field, b_field = _evaluate_field(field, x_half, t + 0.5 * dt)
-
-    # Half acceleration by E, shape (n_part, 3) [m/s].
-    half_kick = q * dt / (2.0 * m) * e_field
-    u_minus = u + half_kick
-
-    # Rotation by B. gamma_minus has shape (n_part, 1) so that it broadcasts on the
-    # 3 components. tvec and svec are t and s of Ripperda et al. (2018); ``t`` is
-    # already the name of the time here.
-    gamma_minus = _lorentz_factor(u_minus)
-    tvec = q * dt / (2.0 * m) * b_field / gamma_minus
-    svec = 2.0 * tvec / (1.0 + np.sum(tvec**2, axis=1, keepdims=True))
-    u_prime = u_minus + np.cross(u_minus, tvec)
-    u_plus = u_minus + np.cross(u_prime, svec)
-
-    u_new = u_plus + half_kick
-
-    # Second half of the move, with the velocity at the end of the step.
-    x_new = x_half + 0.5 * dt * u_new / _lorentz_factor(u_new)
-    return x_new, u_new
+    return _synchronized_step(x, u, field, t, dt, q, m, _boris_velocity, rr_scale)
 
 
 def higuera_cary(
@@ -271,6 +499,8 @@ def higuera_cary(
     dt: float,
     q: float,
     m: float,
+    *,
+    rr_scale: float = 0.0,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Advance the particles by one time step with the Higuera-Cary scheme.
 
@@ -302,6 +532,9 @@ def higuera_cary(
         Signed charge [C], for example ``-e`` for an electron.
     m : float
         Rest mass [kg], strictly positive.
+    rr_scale : float, optional, keyword only
+        Factor [dimensionless] on the radiation reaction force, as in ``boris``:
+        ``0`` (the default) leaves out radiation, ``1`` is the physical force.
 
     Returns
     -------
@@ -315,8 +548,8 @@ def higuera_cary(
     Raises
     ------
     ValueError
-        Same as ``boris``: wrong shapes, or ``t``, ``dt``, ``q``, ``m`` not finite
-        real numbers in their range.
+        Same as ``boris``: wrong shapes, or ``t``, ``dt``, ``q``, ``m``,
+        ``rr_scale`` not finite real numbers in their range.
 
     Notes
     -----
@@ -340,38 +573,12 @@ def higuera_cary(
     Boris would use ``gamma-`` where this uses ``gamma_new`` (``gamma- >= gamma_new``,
     Eq. 25). ``gamma_new`` is the Lorentz factor of the mean momentum
     ``(u + u_new) / 2`` of the step, not that of ``u_new``. Like ``boris``, the step
-    is symmetric in time.
+    is symmetric in time without radiation. With ``rr_scale > 0`` the radiation
+    reaction is added after this velocity update, exactly as in ``boris``.
     """
-    x, u = _check_push_arguments(x, u, t, dt, q, m)
-
-    # First half of the move, with the velocity at the start of the step.
-    x_half = x + 0.5 * dt * u / _lorentz_factor(u)
-    e_field, b_field = _evaluate_field(field, x_half, t + 0.5 * dt)
-
-    half_kick = q * dt / (2.0 * m) * e_field  # eps, Eq. 10
-    u_minus = u + half_kick  # Eq. 18
-    beta = q * dt / (2.0 * m) * b_field  # Eq. 16, dimensionless
-
-    # Lorentz factor of the rotation: positive root of Eq. 20 (see _gamma_from_quartic).
-    gamma_minus_squared = 1.0 + np.sum(u_minus**2, axis=1, keepdims=True) / c**2
-    beta_squared = np.sum(beta**2, axis=1, keepdims=True)
-    beta_dot_u = np.sum(beta * u_minus, axis=1, keepdims=True)
-    gamma_new = _gamma_from_quartic(
-        a=gamma_minus_squared - beta_squared,
-        b=beta_squared + (beta_dot_u / c) ** 2,
+    return _synchronized_step(
+        x, u, field, t, dt, q, m, _higuera_cary_velocity, rr_scale
     )
-
-    # Rotation by B: the Boris rotation, with gamma_new in place of gamma-.
-    tvec = beta / gamma_new
-    svec = 2.0 * tvec / (1.0 + np.sum(tvec**2, axis=1, keepdims=True))
-    u_prime = u_minus + np.cross(u_minus, tvec)
-    u_plus = u_minus + np.cross(u_prime, svec)
-
-    u_new = u_plus + half_kick
-
-    # Second half of the move, with the velocity at the end of the step.
-    x_new = x_half + 0.5 * dt * u_new / _lorentz_factor(u_new)
-    return x_new, u_new
 
 
 def vay(
@@ -382,6 +589,8 @@ def vay(
     dt: float,
     q: float,
     m: float,
+    *,
+    rr_scale: float = 0.0,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Advance the particles by one time step with the relativistic Vay scheme.
 
@@ -414,6 +623,9 @@ def vay(
         Signed charge [C], for example ``-e`` for an electron.
     m : float
         Rest mass [kg], strictly positive.
+    rr_scale : float, optional, keyword only
+        Factor [dimensionless] on the radiation reaction force, as in ``boris``:
+        ``0`` (the default) leaves out radiation, ``1`` is the physical force.
 
     Returns
     -------
@@ -427,8 +639,8 @@ def vay(
     Raises
     ------
     ValueError
-        Same as ``boris``: wrong shapes, or ``t``, ``dt``, ``q``, ``m`` not finite
-        real numbers in their range.
+        Same as ``boris``: wrong shapes, or ``t``, ``dt``, ``q``, ``m``,
+        ``rr_scale`` not finite real numbers in their range.
 
     Notes
     -----
@@ -453,38 +665,10 @@ def vay(
     ``u_new`` solves the implicit equation ``u_new = u' + (u_new / gamma_new) x tau``
     (Eq. 10); the explicit formulas above are its exact solution. Here ``gamma_new``
     is the Lorentz factor of ``u_new`` itself. Like ``boris``, the step is symmetric
-    in time.
+    in time without radiation. With ``rr_scale > 0`` the radiation reaction is added
+    after this velocity update, exactly as in ``boris``.
     """
-    x, u = _check_push_arguments(x, u, t, dt, q, m)
-
-    # First half of the move, with the velocity at the start of the step.
-    x_half = x + 0.5 * dt * u / _lorentz_factor(u)
-    e_field, b_field = _evaluate_field(field, x_half, t + 0.5 * dt)
-
-    half_kick = q * dt / (2.0 * m) * e_field  # eps
-    tau = q * dt / (2.0 * m) * b_field  # dimensionless
-
-    # First half: the electric kick, plus the magnetic rotation with the *old*
-    # velocity v = u / gamma. Eq. 9.
-    u_prime = u + 2.0 * half_kick + np.cross(u / _lorentz_factor(u), tau)
-
-    # Lorentz factor at the end of the step: positive root of Eq. 11.
-    gamma_prime_squared = 1.0 + np.sum(u_prime**2, axis=1, keepdims=True) / c**2
-    tau_squared = np.sum(tau**2, axis=1, keepdims=True)
-    u_star = np.sum(u_prime * tau, axis=1, keepdims=True) / c
-    gamma_new = _gamma_from_quartic(
-        a=gamma_prime_squared - tau_squared, b=tau_squared + u_star**2
-    )
-
-    # Second half: solve the implicit magnetic rotation. Eq. 12.
-    tvec = tau / gamma_new
-    scale = 1.0 / (1.0 + np.sum(tvec**2, axis=1, keepdims=True))
-    u_dot_t = np.sum(u_prime * tvec, axis=1, keepdims=True)
-    u_new = scale * (u_prime + u_dot_t * tvec + np.cross(u_prime, tvec))
-
-    # Second half of the move, with the velocity at the end of the step.
-    x_new = x_half + 0.5 * dt * u_new / _lorentz_factor(u_new)
-    return x_new, u_new
+    return _synchronized_step(x, u, field, t, dt, q, m, _vay_velocity, rr_scale)
 
 
 def rk4(
@@ -495,6 +679,8 @@ def rk4(
     dt: float,
     q: float,
     m: float,
+    *,
+    rr_scale: float = 0.0,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Advance the particles by one time step with the classical Runge-Kutta scheme.
 
@@ -527,6 +713,9 @@ def rk4(
         Signed charge [C], for example ``-e`` for an electron.
     m : float
         Rest mass [kg], strictly positive.
+    rr_scale : float, optional, keyword only
+        Factor [dimensionless] on the radiation reaction force, as in ``boris``:
+        ``0`` (the default) leaves out radiation, ``1`` is the physical force.
 
     Returns
     -------
@@ -540,8 +729,8 @@ def rk4(
     Raises
     ------
     ValueError
-        Same as ``boris``: wrong shapes, or ``t``, ``dt``, ``q``, ``m`` not finite
-        real numbers in their range.
+        Same as ``boris``: wrong shapes, or ``t``, ``dt``, ``q``, ``m``,
+        ``rr_scale`` not finite real numbers in their range.
 
     Notes
     -----
@@ -549,7 +738,12 @@ def rk4(
     ``d(x, u)/dt = f(x, u, t)`` with::
 
         dx/dt = u / gamma,                   gamma = sqrt(1 + |u|^2 / c^2)
-        du/dt = (q / m) (E + (u / gamma) x B)
+        du/dt = (q / m) (E + (u / gamma) x B) + rr_scale F_R(u, E, B) / m
+
+    The radiation reaction ``F_R`` (``radiation.landau_lifshitz_force``) is part of
+    the right-hand side, evaluated at each stage with the fields of that stage: this
+    is not the splitting of Tamburini et al. used by the three other pushers. The
+    ``F_R`` term is skipped when ``rr_scale = 0``.
 
     and one step is the classical four-stage formula::
 
@@ -559,15 +753,19 @@ def rk4(
         k4 = f(x + dt k3_x, u + dt k3_u, t + dt)
         (x_new, u_new) = (x, u) + (dt / 6) (k1 + 2 k2 + 2 k3 + k4)
     """
-    x, u = _check_push_arguments(x, u, t, dt, q, m)
+    x, u = _check_push_arguments(x, u, t, dt, q, m, rr_scale)
 
     def rate_of_change(
         x_stage: NDArray[np.float64], u_stage: NDArray[np.float64], t_stage: float
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-        """Return ``(dx/dt, du/dt)`` at one stage: velocity and Lorentz force."""
+        """Return ``(dx/dt, du/dt)`` at one stage: velocity, Lorentz and F_R."""
         e_field, b_field = _evaluate_field(field, x_stage, t_stage)
         velocity = u_stage / _lorentz_factor(u_stage)
-        return velocity, q / m * (e_field + np.cross(velocity, b_field))
+        acceleration = q / m * (e_field + np.cross(velocity, b_field))
+        if rr_scale != 0.0:
+            radiation_force = landau_lifshitz_force(u_stage, e_field, b_field, q, m)
+            acceleration = acceleration + rr_scale / m * radiation_force
+        return velocity, acceleration
 
     half = 0.5 * dt
     k1_x, k1_u = rate_of_change(x, u, t)
@@ -583,37 +781,48 @@ def rk4(
 # --- choosing a pusher by name -----------------------------------------------------
 
 
-def get_pusher(name: str) -> Pusher:
-    """Return the pusher function called ``name``.
+def get_pusher(name: str, rr_scale: float = 0.0) -> Pusher:
+    """Return the pusher function called ``name``, with radiation if asked.
 
-    This is how ``run`` turns the ``pusher:`` line of a ``.yaml`` file into a
-    function. To add a pusher to the project, write it above and add one line to
-    the dictionary inside this function.
+    This is how ``run`` turns the ``pusher:`` and ``rr_scale:`` lines of a ``.yaml``
+    file into a function. To add a pusher to the project, write it above and add
+    one line to the dictionary inside this function.
 
     Parameters
     ----------
     name : str
         ``"boris"``, ``"higuera_cary"``, ``"vay"`` or ``"rk4"``.
+    rr_scale : float, default 0.0
+        Factor [dimensionless] on the radiation reaction force, finite and ``>= 0``
+        (see ``boris``). With ``0`` the pusher function itself is returned.
 
     Returns
     -------
     Pusher
-        The function ``push(x, u, field, t, dt, q, m) -> (x_new, u_new)``.
+        A function ``push(x, u, field, t, dt, q, m) -> (x_new, u_new)``. For
+        ``rr_scale > 0`` it is the pusher with ``rr_scale`` fixed
+        (``functools.partial``), so that ``integrate`` calls it like any other.
 
     Raises
     ------
     ValueError
-        If there is no pusher of that name. The message lists the available ones.
+        If there is no pusher of that name (the message lists the available ones),
+        or if ``rr_scale`` is not a finite number ``>= 0``.
 
     Examples
     --------
-    >>> push = get_pusher("higuera_cary")
-    >>> push is higuera_cary
+    >>> get_pusher("higuera_cary") is higuera_cary
     True
+    >>> push = get_pusher("boris", rr_scale=1.0e6)
+    >>> push.keywords
+    {'rr_scale': 1000000.0}
     """
     # Built at each call, not stored at module level: the project keeps no global
-    # mutable state.
-    available: dict[str, Pusher] = {
+    # mutable state. The four take the keyword rr_scale beyond the seven arguments
+    # of a Pusher.
+    available: dict[
+        str, Callable[..., tuple[NDArray[np.float64], NDArray[np.float64]]]
+    ] = {
         "boris": boris,
         "higuera_cary": higuera_cary,
         "rk4": rk4,
@@ -624,4 +833,7 @@ def get_pusher(name: str) -> Pusher:
             f"The pusher {name!r} is not implemented yet. "
             f"Available: {sorted(available)}."
         )
-    return available[name]
+    _check_rr_scale(rr_scale)  # now, rather than at the first step of a run
+    if rr_scale == 0.0:
+        return available[name]
+    return functools.partial(available[name], rr_scale=rr_scale)

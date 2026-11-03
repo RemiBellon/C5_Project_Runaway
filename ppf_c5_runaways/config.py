@@ -303,6 +303,12 @@ class RunConfig(BaseModel):
         replaced by an absolute value.
     m : float
         Rest mass of a particle [kg], finite and strictly positive.
+    rr_scale : float, optional
+        Factor [dimensionless] on the radiation reaction force of
+        ``radiation.landau_lifshitz_force``, finite and ``>= 0``. ``0`` (the
+        default, used when the key is absent) leaves out radiation; ``1`` is the
+        physical force; a larger value speeds up the radiative evolution, as if
+        ``tau_0`` were ``rr_scale * tau_0`` (see ``pushers.boris``).
     field : FieldConfig
         Electromagnetic field (see ``FieldConfig``).
     initial : InitialState
@@ -327,6 +333,7 @@ class RunConfig(BaseModel):
     seed: int = Field(ge=0)
     q: FiniteFloat
     m: float = Field(gt=0.0, allow_inf_nan=False)
+    rr_scale: float = Field(default=0.0, ge=0.0, allow_inf_nan=False)
     field: FieldConfig
     initial: InitialState
 

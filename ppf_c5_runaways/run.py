@@ -1,9 +1,12 @@
 """Run a simulation from a .yaml file: read it, compute, write the results."""
 
 import shutil
+import warnings
 from pathlib import Path
+from typing import Final
 
 import numpy as np
+from numpy.typing import NDArray
 
 from ppf_c5_runaways import fields
 from ppf_c5_runaways.config import load_config
@@ -16,6 +19,48 @@ from ppf_c5_runaways.io import (
     write_result,
 )
 from ppf_c5_runaways.pushers import get_pusher
+from ppf_c5_runaways.radiation import landau_lifshitz_parameter, quantum_parameter
+
+# chi and eta must be << 1 for the classical Landau-Lifshitz force (roadmap D5);
+# above this value run warns. The quantum correction to the radiated power is
+# about 6 chi at first order, so 1e-2 already means a few percent.
+VALIDITY_WARNING_THRESHOLD: Final[float] = 1.0e-2
+
+
+def _radiation_validity(
+    u: NDArray[np.float64],
+    e_field: NDArray[np.float64],
+    b_field: NDArray[np.float64],
+    q: float,
+    m: float,
+    rr_scale: float,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """``chi`` and ``eta`` at each saved state; warn if one is not small.
+
+    Roadmap D5: the classical force of Landau and Lifshitz is valid while both the
+    quantum parameter ``chi`` and its own small parameter ``eta`` (which grows with
+    ``rr_scale``) stay well below 1. A run outside this domain is still written,
+    since the equations solved are those asked for, but a ``RuntimeWarning`` says
+    that its physics is not that of a real electron.
+
+    Returns
+    -------
+    chi, eta : ndarray, shape (n_saved, n_part)
+        See ``radiation.quantum_parameter`` and
+        ``radiation.landau_lifshitz_parameter``.
+    """
+    chi = quantum_parameter(u, e_field, b_field, q, m)
+    eta = landau_lifshitz_parameter(u, e_field, b_field, q, m, rr_scale)
+    if max(chi.max(), eta.max()) >= VALIDITY_WARNING_THRESHOLD:
+        warnings.warn(
+            "The Landau-Lifshitz force is used outside its domain of validity: "
+            f"max chi = {chi.max():.3e}, max eta = {eta.max():.3e} (both should be "
+            f"<< 1; this warning starts at {VALIDITY_WARNING_THRESHOLD}). With "
+            "rr_scale > 1, eta grows as rr_scale.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    return chi, eta
 
 
 def pusher(
@@ -28,6 +73,10 @@ def pusher(
     """
     Run the simulation described by a .yaml file and save its trajectories.
 
+    The pusher is that of the ``pusher:`` key, with the radiation reaction force
+    multiplied by ``rr_scale:`` (absent or ``0``: no radiation). Both are recorded
+    with the case in the results folder.
+
     With ``phase_space_volume=True``, the Jacobian determinant of every step is also
     measured (``diagnostics.step_jacobian_determinant``) and stored, for
     ``plotting.phase_space_volume``. It needs ``save_every: 1`` (the volume change of
@@ -37,9 +86,16 @@ def pusher(
     ``Psi`` is also stored at the saved positions ``x^n`` and at ``x^{n+1/2}``
     (``io.write_result``), so that ``P_zeta`` can be computed from the results
     folder alone, as it is and as a staggered code would measure it.
+
+    With radiation (``rr_scale > 0``), the quantum parameter ``chi`` and the
+    validity parameter ``eta`` of the Landau-Lifshitz force are stored at every
+    saved state, and a ``RuntimeWarning`` is raised if either reaches
+    ``VALIDITY_WARNING_THRESHOLD`` (roadmap D5).
     """
     config = load_config(config_path)
-    push = get_pusher(config.pusher)  # fails first if the pusher does not exist
+    # Fails first if the pusher does not exist. With rr_scale > 0 (key of the .yaml)
+    # the pusher includes the radiation reaction force.
+    push = get_pusher(config.pusher, config.rr_scale)
     if phase_space_volume and config.save_every != 1:
         raise ValueError(
             "phase_space_volume=True needs save_every: 1 in the configuration, so "
@@ -102,11 +158,19 @@ def pusher(
         q=config.q,
         m=config.m,
     )
-    # Magnetic field at each saved position and time, for the diagnostics that
+    # Fields at each saved position and time. B is stored for the diagnostics that
     # need it (magnetic moment, gyration phase): plotting never evaluates a field.
+    e_field = np.empty_like(x)
     b_field = np.empty_like(x)
     for k in range(t.size):
-        _, b_field[k] = field(x[k], t[k])
+        e_field[k], b_field[k] = field(x[k], t[k])
+    # Validity of the radiation force at each saved state (roadmap D5).
+    chi = None
+    eta = None
+    if config.rr_scale > 0.0:
+        chi, eta = _radiation_validity(
+            u, e_field, b_field, config.q, config.m, config.rr_scale
+        )
     # Determinant of the step that starts at each saved state (x^n, u^n).
     step_determinant = None
     if phase_space_volume:
@@ -145,6 +209,8 @@ def pusher(
             step_jacobian_determinant=step_determinant,
             poloidal_flux=poloidal_flux,
             poloidal_flux_half_step=poloidal_flux_half_step,
+            quantum_parameter=chi,
+            landau_lifshitz_parameter=eta,
         )
     except BaseException:
         if created:
