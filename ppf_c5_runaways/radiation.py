@@ -399,3 +399,119 @@ def maximum_lorentz_factor(
         / (abs(q) ** 3 * b_field**2 * np.sin(pitch_angle) ** 2)
     )
     return np.sqrt(gamma_squared)
+
+
+def radiating_helix(
+    u0: ArrayLike,
+    b_z: float,
+    time: ArrayLike,
+    q: float,
+    m: float,
+    rr_scale: float = 1.0,
+) -> NDArray[np.float64]:
+    """Exact proper velocity of particles that radiate in a uniform magnetic field.
+
+    The field is ``B = b_z z`` with ``b_z > 0`` and no electric field; the force is
+    ``q v x B + rr_scale F_R`` with ``F_R`` of ``landau_lifshitz_force``. Its part
+    along ``B`` reduces ``u_par`` in the same ratio as ``gamma``, so
+    ``beta_par = u_par / (gamma c)`` is constant, and ``gamma`` obeys::
+
+        d gamma / dt = -(gamma^2 / gamma_par^2 - 1) / tau_R,
+        tau_R = 6 pi eps_0 m^3 c^3 / (rr_scale q^4 b_z^2),
+
+    with ``gamma_par = 1 / sqrt(1 - beta_par^2)``, the value ``gamma`` decays to
+    (roadmap 2.5, derived again in RAPPORT §5.44). Its solution is::
+
+        gamma = gamma_par (1 + y) / (1 - y),   y = A exp(-k t),
+        k = 2 / (gamma_par tau_R),   A = (gamma_0 - gamma_par) / (gamma_0 + gamma_par).
+
+    In the plane perpendicular to ``B``, ``F_R`` is along ``-u_perp``: ``u_perp``
+    shrinks and turns as without radiation, by the angle ``-(q b_z / m) tau``,
+    where ``tau = integral of dt / gamma`` is the proper time (the form of Elkina
+    et al. 2014, Eq. 29)::
+
+        tau = [ t + (2 / k) ln((1 + y) / (1 + A)) ] / gamma_par.
+
+    Parameters
+    ----------
+    u0 : array_like, shape (n_part, 3)
+        Proper velocities ``u = gamma v`` [m/s] at ``t = 0``.
+    b_z : float
+        Magnetic field along ``z`` [T], finite and strictly positive.
+    time : array_like, shape (n_t,)
+        Times [s] at which the velocity is returned, finite and ``>= 0``.
+    q : float
+        Signed charge [C], for example ``-e`` for an electron.
+    m : float
+        Rest mass [kg], finite and strictly positive.
+    rr_scale : float, optional
+        Factor on the radiation force, as in the pushers; finite and strictly
+        positive (without radiation the motion is the helix of the pushers' tests).
+        Default 1, the physical force.
+
+    Returns
+    -------
+    ndarray, shape (n_t, n_part, 3)
+        Proper velocities [m/s] at the times ``time``.
+
+    Raises
+    ------
+    ValueError
+        If ``u0`` is not of shape (n_part, 3) with finite values, ``time`` is not
+        one-dimensional with finite values ``>= 0``, ``b_z`` or ``rr_scale`` is not
+        a finite number ``> 0``, ``q`` is not finite, or ``m`` is not finite and
+        strictly positive.
+
+    Notes
+    -----
+    The formulas are written so that nothing cancels when ``gamma -> 1``:
+    ``A = gamma_par^2 w / (gamma_0 + gamma_par)^2`` with ``w = |u0_perp|^2 / c^2``,
+    ``|u_perp| = 2 c sqrt(y) / (1 - y)``, and the logarithm of ``tau`` through
+    ``log1p`` and ``expm1``. The field and the radiation force are imposed and the
+    particle is a test particle; the term in ``D/Dt`` of the Landau-Lifshitz force
+    is left out, as in ``landau_lifshitz_force``.
+    """
+    _check_charge_and_mass(q, m)
+    for name, value in (("b_z", b_z), ("rr_scale", rr_scale)):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, Real)
+            or not math.isfinite(value)
+            or value <= 0.0
+        ):
+            raise ValueError(f"{name} must be a finite number > 0, got {value!r}")
+    u0 = np.asarray(u0, dtype=np.float64)
+    time = np.asarray(time, dtype=np.float64)
+    if u0.ndim != 2 or u0.shape[1] != 3 or not np.all(np.isfinite(u0)):
+        raise ValueError(
+            f"u0 must have shape (n_part, 3) with finite values; got shape {u0.shape}"
+        )
+    if time.ndim != 1 or not np.all(np.isfinite(time)) or np.any(time < 0.0):
+        raise ValueError(
+            f"time must be one-dimensional with finite values >= 0; got shape "
+            f"{time.shape}"
+        )
+
+    radiation_time = (
+        6.0 * np.pi * eps_0 * m**3 * c**3 / (rr_scale * q**4 * b_z**2)
+    )  # tau_R [s]
+    w = (u0[:, 0] ** 2 + u0[:, 1] ** 2) / c**2
+    gamma0 = np.sqrt(1.0 + w + u0[:, 2] ** 2 / c**2)
+    gamma_par = gamma0 / np.sqrt(1.0 + w)
+    a = gamma_par**2 * w / (gamma0 + gamma_par) ** 2
+    k = 2.0 / (gamma_par * radiation_time)  # [1/s]
+
+    t = time[:, np.newaxis]  # (n_t, 1), against (n_part,) for each particle
+    y = a * np.exp(-k * t)
+    gamma = gamma_par * (1.0 + y) / (1.0 - y)
+    proper_time = (t + (2.0 / k) * np.log1p(a * np.expm1(-k * t) / (1.0 + a))) / (
+        gamma_par
+    )
+    angle = np.arctan2(u0[:, 1], u0[:, 0]) - q * b_z / m * proper_time
+    u_perp = 2.0 * c * np.sqrt(y) / (1.0 - y)
+
+    u = np.empty((time.size, u0.shape[0], 3))
+    u[..., 0] = u_perp * np.cos(angle)
+    u[..., 1] = u_perp * np.sin(angle)
+    u[..., 2] = u0[:, 2] * gamma / gamma0
+    return u

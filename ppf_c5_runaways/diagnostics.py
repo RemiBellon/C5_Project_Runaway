@@ -10,7 +10,7 @@ from scipy.integrate import quad
 from scipy.special import kv
 
 from ppf_c5_runaways.constants import c, eps_0
-from ppf_c5_runaways.fields import Field
+from ppf_c5_runaways.fields import Field, cartesian_to_toroidal
 from ppf_c5_runaways.pushers import Pusher
 
 
@@ -699,6 +699,73 @@ def is_trapped(
 
     u_dot_b = np.sum(u * b_field, axis=2)
     return np.any(u_dot_b > 0.0, axis=0) & np.any(u_dot_b < 0.0, axis=0)
+
+
+def is_lost(x: NDArray[np.float64], r0: float, r_edge: float) -> NDArray[np.bool_]:
+    """Whether each particle reached the edge of the plasma during the run.
+
+    A particle is lost if its minor radius ``r``, its distance to the magnetic
+    axis (the circle of radius ``R0`` in the plane ``z = 0``), reaches ``r_edge`` at
+    one saved state at least: ``r = sqrt((R - R0)^2 + z^2)``, with ``R`` the
+    distance to the vertical axis (``fields.cartesian_to_toroidal``). This is the
+    test made after the run that replaces a stop at the edge (OPEN_POINTS N7, N48):
+    the motion is computed beyond the edge, in a field that is no longer physical
+    there, and the particle is then left out of the statistics of the confined
+    ones, which Carbajal et al. (2017, Fig. 4) count apart.
+
+    Parameters
+    ----------
+    x : ndarray, shape (n_saved, n_part, 3)
+        Positions [m] of the saved states, at least one.
+    r0 : float
+        Major radius ``R0`` [m], finite and strictly positive.
+    r_edge : float
+        Minor radius of the edge of the plasma [m], finite, in ``(0, r0)``.
+
+    Returns
+    -------
+    ndarray of bool, shape (n_part,)
+        ``True`` for the particles with ``r >= r_edge`` at one saved state at least.
+
+    Raises
+    ------
+    ValueError
+        If ``x`` is not of shape (n_saved, n_part, 3) with ``n_saved >= 1``,
+        ``r0`` is not finite and strictly positive, ``r_edge`` is not finite and
+        in ``(0, r0)``, or ``fields.cartesian_to_toroidal`` refuses a position.
+
+    Notes
+    -----
+    Only the saved states are seen: a particle that crosses the edge and comes back
+    between two of them is counted as confined. The interval between saved states
+    must be short against the time over which ``r`` changes near its largest value
+    on the orbit. ``r`` is that of the particle, not of its guiding centre: the
+    gyration adds up to one Larmor radius to it.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if x.ndim != 3 or x.shape[2] != 3 or x.shape[0] < 1:
+        raise ValueError(
+            f"x must have shape (n_saved, n_part, 3) with n_saved >= 1; got {x.shape}"
+        )
+    if (
+        isinstance(r0, bool)
+        or not isinstance(r0, (int, float))
+        or not np.isfinite(r0)
+        or r0 <= 0.0
+    ):
+        raise ValueError(f"r0 must be a finite, strictly positive number, got {r0!r}")
+    if (
+        isinstance(r_edge, bool)
+        or not isinstance(r_edge, (int, float))
+        or not np.isfinite(r_edge)
+        or not 0.0 < r_edge < r0
+    ):
+        raise ValueError(
+            f"r_edge must be a finite number in (0, r0) = (0, {r0}) m, got {r_edge!r}"
+        )
+
+    minor_radius, _, _ = cartesian_to_toroidal(x, r0)
+    return np.any(minor_radius >= r_edge, axis=0)
 
 
 def canonical_toroidal_momentum(

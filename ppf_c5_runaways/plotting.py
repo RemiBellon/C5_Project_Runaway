@@ -1,8 +1,9 @@
 """Figures made from a results folder."""
 
 from collections.abc import Sequence
+from itertools import pairwise
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, NamedTuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,17 +11,21 @@ from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.rcsetup import cycler
 from matplotlib.ticker import NullFormatter
-from matplotlib.typing import RcKeyType
+from matplotlib.typing import LineStyleType, RcKeyType
 from numpy.typing import NDArray
 
 import ppf_c5_runaways.config as config
-from ppf_c5_runaways import diagnostics
-from ppf_c5_runaways.constants import c
+from ppf_c5_runaways import diagnostics, radiation
+from ppf_c5_runaways.constants import c, e
 from ppf_c5_runaways.io import CONFIG_FILENAME, list_results, read_result
 
 # Lengths are computed in metres, and shown in millimetres because a Larmor radius in
 # a tokamak is of that order. The conversion is done here, at the edge, only to draw.
 _METRES_TO_MILLIMETRES = 1.0e3
+
+# Momenta are computed as proper velocities [m/s] and shown as p c in MeV, the unit
+# of the runaway literature: p c [J] = m u c, and 1 MeV = 1e6 e J.
+_JOULES_PER_MEV = 1.0e6 * e
 
 _LINE_COLORS = [
     "royalblue",
@@ -1718,6 +1723,1252 @@ def poincare_section(
             axes.set_title(rf"{name}, $\Delta t$ = {result.attrs['dt']:.3g} s")
         panels[0, 0].set_ylabel(r"$u_y / c$")
         panels[0, -1].legend(fontsize=9, markerscale=6)
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.show()
+    return figure
+
+
+def _radiating_helix_field(run_config: config.RunConfig) -> float:
+    """``b_z`` of a run that ``radiation.radiating_helix`` solves exactly.
+
+    That is a uniform ``B = b_z z`` with ``b_z > 0``, no electric field and the
+    radiation force on (``rr_scale > 0``).
+    """
+    field = run_config.field
+    if field.kind != "uniform_cartesian":
+        raise ValueError(
+            f"The exact solution needs a uniform field (kind 'uniform_cartesian'), "
+            f"got kind {field.kind!r}"
+        )
+    if run_config.rr_scale <= 0.0:
+        raise ValueError(
+            "The run has no radiation (rr_scale: 0): there is no decay to draw"
+        )
+    if any(component != 0.0 for component in field.e_field):
+        raise ValueError(
+            f"The exact solution has no electric field, got e_field {field.e_field}"
+        )
+    b_x, b_y, b_z = field.b_field
+    if b_x != 0.0 or b_y != 0.0 or b_z <= 0.0:
+        raise ValueError(
+            "The exact solution needs B along +z, b_field [0, 0, b_z] with b_z > 0; "
+            f"got {field.b_field}"
+        )
+    return float(b_z)
+
+
+def radiative_decay(
+    result_dir: str | Path,
+    pusher: str | Sequence[str] | None = None,
+    *,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """
+    Draw the Lorentz factor of electrons that radiate in a uniform magnetic field.
+
+    The run is a uniform ``B = b_z z``, without electric field, with the radiation
+    force multiplied by ``rr_scale = s``. Its exact solution
+    (``radiation.radiating_helix``) is drawn as a black dotted line over each
+    computed curve. The parallel velocity ``beta_par`` is constant, and ``gamma``
+    decays to ``gamma_par = 1 / sqrt(1 - beta_par^2)``. ``gamma`` depends on time
+    only through ``s t``, so the horizontal axis is the physical time ``s t``,
+    exactly. Both axes are logarithmic; the state at ``t = 0`` is not drawn. One
+    colour per particle, labelled with its initial pitch angle; one line style per
+    pusher.
+
+    Parameters
+    ----------
+    result_dir : str or pathlib.Path
+        Results folder given by ``run.pusher`` for such a run.
+    pusher : str or sequence of str, optional
+        Which pusher(s) of the folder to draw. Default: all of them.
+    show : bool, optional
+        Open the figure in a window. Default ``True``.
+    save_path : str or pathlib.Path, optional
+        If given, the figure is also saved as a PNG and as a PDF (no extension).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure, square, 6 x 6 in.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no pusher is given and the folder holds no trajectories.
+    ValueError
+        If a pusher is not in the folder, or the run is not one that
+        ``radiation.radiating_helix`` solves: field not uniform, no radiation, an
+        electric field, or ``B`` not along ``+z``.
+    """
+    run_config = config.load_config(Path(result_dir) / CONFIG_FILENAME)
+    b_z = _radiating_helix_field(run_config)
+    results = _read_selected(result_dir, pusher)
+    s = run_config.rr_scale
+    u0 = np.array(run_config.initial.u0, dtype=np.float64)
+
+    with plt.rc_context(figure_style()):
+        figure, axes = plt.subplots()
+        for k, (name, result) in enumerate(results.items()):
+            time = result["time"].values
+            later = time > 0.0  # a logarithmic axis cannot show t = 0
+            gamma = np.sqrt(1.0 + np.sum(result["u"].values ** 2, axis=-1) / c**2)
+            labels = _pitch_angle_labels(result)
+            for i in range(gamma.shape[1]):
+                label = labels[i] if len(results) == 1 else f"{name}, {labels[i]}"
+                axes.plot(
+                    s * time[later],
+                    gamma[later, i],
+                    color=_LINE_COLORS[i % len(_LINE_COLORS)],
+                    linestyle=_LINE_STYLES[k % len(_LINE_STYLES)],
+                    label=label,
+                )
+
+        # The pushers of a folder share the case, hence the times and the exact curve.
+        time = next(iter(results.values()))["time"].values
+        time = time[time > 0.0]
+        u_exact = radiation.radiating_helix(
+            u0, b_z, time, run_config.q, run_config.m, rr_scale=s
+        )
+        gamma_exact = np.sqrt(1.0 + np.sum(u_exact**2, axis=-1) / c**2)
+        for i in range(gamma_exact.shape[1]):
+            axes.plot(
+                s * time,
+                gamma_exact[:, i],
+                color="black",
+                linestyle=":",
+                linewidth=1.2,
+                label="exact solution" if i == 0 else None,
+            )
+
+        axes.set_xscale("log")
+        axes.set_yscale("log")
+        axes.set_xlabel(r"physical time $s\,t$ [s]")
+        axes.set_ylabel(r"$\gamma$")
+        axes.set_title(rf"$B$ = {b_z:g} T, no $E$, $s$ = {s:.3g}", fontsize=13)
+        axes.legend(fontsize=11)
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.show()
+    return figure
+
+
+# Line style of each case of momentum_plane, after the forces of the run.
+_CASE_STYLES: dict[str, LineStyleType] = {
+    "E and radiation": "-",
+    "E only": "--",
+    "radiation only": ":",
+}
+
+
+def _force_case(run_config: config.RunConfig) -> str:
+    """Name of the case of a run: which of ``E`` and radiation act.
+
+    For the uniform field and the tokamak field of Carbajal et al., the two kinds
+    with an electric field and radiation in the article.
+    """
+    field = run_config.field
+    if field.kind == "uniform_cartesian":
+        has_e = any(component != 0.0 for component in field.e_field)
+    elif field.kind == "carbajal":
+        has_e = field.e0 != 0.0
+    else:
+        raise ValueError(
+            f"The run {run_config.name!r} has a field of kind {field.kind!r}; the "
+            "cases are defined for 'uniform_cartesian' and 'carbajal'"
+        )
+    has_radiation = run_config.rr_scale > 0.0
+    if has_e and has_radiation:
+        return "E and radiation"
+    if has_e:
+        return "E only"
+    if has_radiation:
+        return "radiation only"
+    raise ValueError(
+        f"The run {run_config.name!r} has neither an electric field nor radiation: "
+        "its momentum does not change"
+    )
+
+
+def _parallel_and_perpendicular_mev(
+    u: NDArray[np.float64], b_field: NDArray[np.float64], m: float
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """``p_par c`` and ``p_perp c`` [MeV] of the states, shape (n_saved, n_part)."""
+    b_unit = b_field / np.linalg.norm(b_field, axis=-1, keepdims=True)
+    u_par = np.sum(u * b_unit, axis=-1)
+    u_perp = np.linalg.norm(u - u_par[..., None] * b_unit, axis=-1)
+    to_mev = m * c / _JOULES_PER_MEV
+    return to_mev * u_par, to_mev * u_perp
+
+
+def _check_momentum_plane_cases(
+    run_configs: list[config.RunConfig], time_scale: float
+) -> tuple[float, float]:
+    """Check that the runs are one uniform ``E || B`` case; return ``(|B|, E/s)``.
+
+    ``E/s`` [V/m] is the physical electric field, 0 if no run has one.
+    """
+    if not np.isfinite(time_scale) or time_scale <= 0.0:
+        raise ValueError(f"time_scale must be finite and > 0, got {time_scale!r}")
+    b_norms, e_norms = set(), set()
+    for run_config in run_configs:
+        field = run_config.field
+        if field.kind != "uniform_cartesian":
+            raise ValueError(
+                f"The run {run_config.name!r} is not in a uniform field (kind "
+                f"{field.kind!r}): the balance curve is that of uniform E || B"
+            )
+        b_field = np.array(field.b_field, dtype=np.float64)
+        e_field = np.array(field.e_field, dtype=np.float64)
+        b_norm, e_norm = np.linalg.norm(b_field), np.linalg.norm(e_field)
+        if np.linalg.norm(np.cross(e_field, b_field)) > 1.0e-12 * e_norm * b_norm:
+            raise ValueError(
+                f"In the run {run_config.name!r}, E {field.e_field} is not along "
+                f"B {field.b_field}"
+            )
+        if run_config.rr_scale > 0.0 and run_config.rr_scale != time_scale:
+            raise ValueError(
+                f"The run {run_config.name!r} has rr_scale {run_config.rr_scale}, "
+                f"not the time_scale {time_scale}: E and F_R must be scaled together"
+            )
+        _force_case(run_config)
+        b_norms.add(float(b_norm))
+        if e_norm > 0.0:
+            e_norms.add(float(e_norm))
+    if len(b_norms) != 1 or len(e_norms) > 1:
+        raise ValueError(
+            "The runs must share the same |B| and, when they have one, the same |E|: "
+            f"got |B| {sorted(b_norms)} T and |E| {sorted(e_norms)} V/m"
+        )
+    e_physical = e_norms.pop() / time_scale if e_norms else 0.0
+    return b_norms.pop(), e_physical
+
+
+def momentum_plane(
+    result_dirs: Sequence[str | Path],
+    time_scale: float,
+    pusher: str = "boris",
+    *,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """
+    Draw the path of each electron in the plane ``(p_par c, p_perp c)``, in MeV.
+
+    The runs are one case in uniform fields ``E || B``, computed with the forces
+    multiplied by ``s = time_scale`` (OPEN_POINTS N44): ``E`` (the field of the
+    ``.yaml`` is ``s`` times the physical one) and, when ``rr_scale > 0``, the
+    radiation force (``rr_scale = s``). Each folder is one choice of forces, read
+    from its configuration and drawn with its own line style: ``E`` and
+    radiation (solid), ``E`` only (dashed), radiation only (dotted). One colour per
+    particle, labelled with its initial pitch angle; a black dot marks the start.
+
+    The grey curve is the balance ``gamma = gamma_max(theta)`` of
+    ``radiation.maximum_lorentz_factor``, for the physical field ``|E| / s``. It
+    does not depend on ``s``, since the gain goes as ``s E`` and the loss as
+    ``s F_R``. It is drawn only if a run has an electric field.
+
+    Parameters
+    ----------
+    result_dirs : sequence of str or pathlib.Path
+        Results folders given by ``run.pusher``, one per choice of forces.
+    time_scale : float
+        The factor ``s`` on ``E`` and ``F_R`` [dimensionless], > 0. The physical
+        time is ``s t``.
+    pusher : str, optional
+        The pusher drawn, present in every folder. Default ``"boris"``.
+    show : bool, optional
+        Open the figure in a window. Default ``True``.
+    save_path : str or pathlib.Path, optional
+        If given, the figure is also saved as a PNG and as a PDF (no extension).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure, square, 6 x 6 in.
+
+    Raises
+    ------
+    ValueError
+        If ``time_scale`` is not finite and > 0, or the runs are not one uniform
+        ``E || B`` case: a field not uniform, ``E`` not along ``B``, a run with
+        ``rr_scale`` other than ``time_scale``, different ``|B|``, different
+        ``|E|`` among the runs that have one, different durations, a run without
+        any force, or ``pusher`` missing from a folder.
+    """
+    run_configs = [
+        config.load_config(Path(directory) / CONFIG_FILENAME)
+        for directory in result_dirs
+    ]
+    b_norm, e_physical = _check_momentum_plane_cases(run_configs, time_scale)
+    results = [read_result(directory, pusher) for directory in result_dirs]
+    end_times = {float(result["time"].values[-1]) for result in results}
+    if len(end_times) != 1:
+        raise ValueError(
+            f"The runs must last the same time; they end at {sorted(end_times)} s"
+        )
+    m = run_configs[0].m
+
+    with plt.rc_context(figure_style()):
+        figure, axes = plt.subplots()
+        labels = _pitch_angle_labels(results[0])
+        for run_config, result in zip(run_configs, results, strict=True):
+            case = _force_case(run_config)
+            p_par, p_perp = _parallel_and_perpendicular_mev(
+                result["u"].values, result["b_field"].values, m
+            )
+            for i in range(p_par.shape[1]):
+                axes.plot(
+                    p_par[:, i],
+                    p_perp[:, i],
+                    color=_LINE_COLORS[i % len(_LINE_COLORS)],
+                    linestyle=_CASE_STYLES[case],
+                )
+                axes.plot(p_par[0, i], p_perp[0, i], "o", color="black", markersize=4)
+
+        if e_physical > 0.0:
+            # Drawn over the range of the paths only: gamma_max grows without bound
+            # as theta -> 0.
+            x_limits, y_limits = axes.get_xlim(), axes.get_ylim()
+            theta = np.linspace(0.002, 0.5 * np.pi - 0.002, 2000)
+            gamma_max = radiation.maximum_lorentz_factor(
+                e_physical, b_norm, theta, run_configs[0].q, m
+            )
+            p_max = m * c**2 * np.sqrt(gamma_max**2 - 1.0) / _JOULES_PER_MEV
+            axes.plot(
+                p_max * np.cos(theta),
+                p_max * np.sin(theta),
+                color="0.6",
+                linewidth=3.0,
+                zorder=0,
+            )
+            axes.set_xlim(x_limits)
+            axes.set_ylim(y_limits)
+
+        handles = [
+            Line2D([], [], color=_LINE_COLORS[i % len(_LINE_COLORS)], label=label)
+            for i, label in enumerate(labels)
+        ]
+        cases = [_force_case(run_config) for run_config in run_configs]
+        handles += [
+            Line2D([], [], color="black", linestyle=_CASE_STYLES[case], label=case)
+            for case in _CASE_STYLES
+            if case in cases
+        ]
+        if e_physical > 0.0:
+            handles.append(
+                Line2D(
+                    [],
+                    [],
+                    color="0.6",
+                    linewidth=3.0,
+                    label=r"$\gamma = \gamma_{\max}(\theta)$",
+                )
+            )
+        axes.legend(handles=handles, fontsize=10)
+        axes.set_xlabel(r"$p_\parallel c$ [MeV]")
+        axes.set_ylabel(r"$p_\perp c$ [MeV]")
+        duration = time_scale * end_times.pop()
+        axes.set_title(
+            rf"$|E|$ = {e_physical:.3g} V/m, $B$ = {b_norm:.3g} T, "
+            rf"{duration * 1.0e3:.3g} ms, $s$ = {time_scale:.3g}",
+            fontsize=12,
+        )
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.show()
+    return figure
+
+
+# Colour and open marker of each pusher on the convergence figures, the same
+# whatever the folders; open markers of different shapes stay visible when the
+# errors of two pushers are equal.
+_PUSHER_ORDER = ("boris", "vay", "higuera_cary", "rk4")
+_PUSHER_MARKERS = {"boris": "o", "vay": "s", "higuera_cary": "^", "rk4": "D"}
+
+
+def radiative_decay_convergence(
+    result_dirs: Sequence[str | Path],
+    pusher: str | Sequence[str] | None = None,
+    *,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """
+    Draw the error on ``gamma`` against the angle turned per step, for each pusher.
+
+    Each folder is the run of ``radiative_decay`` (uniform ``B`` along ``z``,
+    radiation only) with one time step ``dt`` and one ``rr_scale = s``. The error
+    of a pusher is the largest ``|gamma / gamma_exact - 1|`` over the saved states
+    (``t > 0``) and the particles, against ``radiation.radiating_helix``. It is
+    drawn against ``theta_end = |q| B dt / (m gamma_end)``, the angle turned per
+    step at the end of the run by the particle of smallest exact ``gamma_end``:
+    the step resolves the gyration worst there (OPEN_POINTS N45). Logarithmic axes;
+    one colour and open marker per pusher (of decreasing size, so that equal
+    errors stay visible), one line style per ``s``. The grey guides go as
+    ``theta^2`` and ``theta^4``, through the point of largest ``theta`` of the first
+    second-order pusher and of ``rk4``.
+
+    Parameters
+    ----------
+    result_dirs : sequence of str or pathlib.Path
+        Results folders given by ``run.pusher``, one per ``(dt, s)``: the same
+        particles at ``t = 0``, the same ``B`` and the same physical duration
+        ``s t_end``.
+    pusher : str or sequence of str, optional
+        Which pusher(s) to draw, present in every folder. Default: those of the
+        first folder.
+    show : bool, optional
+        Open the figure in a window. Default ``True``.
+    save_path : str or pathlib.Path, optional
+        If given, the figure is also saved as a PNG and as a PDF (no extension).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure, square, 6 x 6 in.
+
+    Raises
+    ------
+    ValueError
+        If no folder is given, a run is not one that ``radiation.radiating_helix``
+        solves, or the runs differ by more than ``dt`` and ``s``: other initial
+        velocities, another ``B``, another physical duration.
+    """
+    if len(result_dirs) == 0:
+        raise ValueError("No results folder given")
+    if pusher is None:
+        names = list_results(result_dirs[0])
+    elif isinstance(pusher, str):
+        names = [pusher]
+    else:
+        names = list(pusher)
+
+    points: dict[tuple[str, float], list[tuple[float, float]]] = {}
+    cases = set()
+    for directory in result_dirs:
+        run_config = config.load_config(Path(directory) / CONFIG_FILENAME)
+        b_z = _radiating_helix_field(run_config)
+        s = run_config.rr_scale
+        u0 = np.array(run_config.initial.u0, dtype=np.float64)
+        for name in names:
+            result = read_result(directory, name)
+            time = result["time"].values
+            later = time > 0.0
+            cases.add((u0.tobytes(), b_z, float(s * time[-1])))
+            u_exact = radiation.radiating_helix(
+                u0, b_z, time[later], run_config.q, run_config.m, rr_scale=s
+            )
+            gamma_exact = np.sqrt(1.0 + np.sum(u_exact**2, axis=-1) / c**2)
+            u = result["u"].values[later]
+            gamma = np.sqrt(1.0 + np.sum(u**2, axis=-1) / c**2)
+            error = float(np.max(np.abs(gamma / gamma_exact - 1.0)))
+            theta_end = (
+                abs(run_config.q)
+                * b_z
+                * result.attrs["dt"]
+                / (run_config.m * gamma_exact[-1].min())
+            )
+            points.setdefault((name, s), []).append((theta_end, error))
+    # Durations compared to rounding: s t_end is a product of two stored numbers.
+    durations = sorted(case[2] for case in cases)
+    same_duration = np.isclose(durations[0], durations[-1], rtol=1e-12, atol=0.0)
+    if len({case[:2] for case in cases}) != 1 or not same_duration:
+        raise ValueError(
+            "The folders must hold one case run with several dt and s: the same "
+            "initial velocities, the same B and the same physical duration s t_end"
+        )
+
+    scales = sorted({s for _, s in points})
+    with plt.rc_context(figure_style()):
+        figure, axes = plt.subplots()
+        for (name, s), group in points.items():
+            theta, error = np.array(sorted(group)).T
+            axes.plot(
+                theta,
+                error,
+                marker=_PUSHER_MARKERS[name],
+                markerfacecolor="none",
+                markersize=9 - 1.5 * _PUSHER_ORDER.index(name),
+                color=_LINE_COLORS[_PUSHER_ORDER.index(name)],
+                linestyle=_LINE_STYLES[scales.index(s) % len(_LINE_STYLES)],
+                label=f"{name}, $s$ = {s:.0e}",
+            )
+        # The point of largest theta of the first group of each order.
+        second_order = [max(g) for (name, _), g in points.items() if name != "rk4"]
+        fourth_order = [max(g) for (name, _), g in points.items() if name == "rk4"]
+        for order, anchors in ((2, second_order), (4, fourth_order)):
+            if anchors:
+                theta_anchor, error_anchor = anchors[0]
+                theta_guide = np.geomspace(theta_anchor / 10.0, theta_anchor, 2)
+                axes.plot(
+                    theta_guide,
+                    error_anchor * (theta_guide / theta_anchor) ** order,
+                    color="0.6",
+                    linewidth=1.0,
+                    linestyle="--",
+                    label=rf"$\propto \theta^{order}$",
+                )
+        axes.set_xscale("log")
+        axes.set_yscale("log")
+        axes.xaxis.set_minor_formatter(NullFormatter())  # labels would overlap
+        axes.set_xlabel(r"angle per step at the end, $\theta_{\mathrm{end}}$ [rad]")
+        axes.set_ylabel(r"$\max\,|\gamma / \gamma_{\mathrm{exact}} - 1|$")
+        axes.legend(fontsize=9)
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.show()
+    return figure
+
+
+def _physical_case(run_config: config.RunConfig) -> tuple[dict[str, Any], Any]:
+    """Split a scaled run into what must match between ``s`` and its ``E / s``.
+
+    Returns the configuration without the keys that change with ``s`` (name,
+    number of steps and of saves, ``rr_scale``, the electric field), and the
+    physical electric field ``E / s``: ``e_field / s`` [V/m] for a uniform field,
+    ``e0 / s`` [V/m] for the field of Carbajal et al.
+    """
+    s = run_config.rr_scale
+    field = run_config.field
+    if s <= 0.0:
+        raise ValueError(
+            f"The run {run_config.name!r} has no radiation (rr_scale: 0): its scale "
+            "s is not known"
+        )
+    if field.kind == "uniform_cartesian":
+        e_physical: Any = np.array(field.e_field, dtype=np.float64) / s
+        electric_key = "e_field"
+    elif field.kind == "carbajal":
+        e_physical = field.e0 / s
+        electric_key = "e0"
+    else:
+        raise ValueError(
+            f"The run {run_config.name!r} has a field of kind {field.kind!r}, "
+            "without electric field to scale"
+        )
+    case = run_config.model_dump(exclude={"name", "n_steps", "save_every", "rr_scale"})
+    del case["field"][electric_key]
+    return case, e_physical
+
+
+def scaling_error(
+    result_dirs: Sequence[str | Path],
+    pusher: str = "boris",
+    *,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """
+    Draw how ``gamma`` changes with the common scale ``s`` of ``E`` and ``F_R``.
+
+    Each folder is the same physical case run with ``E`` and the radiation force
+    multiplied by its own ``s = rr_scale`` (OPEN_POINTS N44), with the same step
+    ``dt`` and its states saved at the same physical times ``s t``. Sorted by
+    ``s``, two successive runs ``s < s'`` give, for each particle, the root mean
+    square over the saved times of ``gamma_s' - gamma_s``, over its initial
+    ``gamma_0``; it is drawn against ``s``. If the error of the scaling is of
+    first order, ``gamma_s = gamma_phys + s A(t)``: with ``s' = 2 s`` the points lie
+    on the grey guide of slope 1, and ``gamma_2s - gamma_s`` estimates the error of
+    the run at ``s``. The pusher's own error, which also differs from one ``s``
+    to the next (the same physical time is a different number of steps), is
+    included: it must be small for the figure to show the scaling. One colour per
+    particle, labelled with its initial pitch angle.
+
+    Parameters
+    ----------
+    result_dirs : sequence of str or pathlib.Path
+        At least two results folders given by ``run.pusher``, one per ``s``.
+    pusher : str, optional
+        The pusher drawn, present in every folder. Default ``"boris"``.
+    show : bool, optional
+        Open the figure in a window. Default ``True``.
+    save_path : str or pathlib.Path, optional
+        If given, the figure is also saved as a PNG and as a PDF (no extension).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure, square, 6 x 6 in.
+
+    Raises
+    ------
+    ValueError
+        If there are fewer than two folders, two of them have the same ``s``, a run
+        has no radiation or no field to scale, or the runs are not one physical
+        case: another configuration (``dt`` included), another physical field
+        ``E / s``, other physical output times.
+    """
+    if len(result_dirs) < 2:
+        raise ValueError("Two runs at least are needed to compare two values of s")
+    runs = []
+    for directory in result_dirs:
+        run_config = config.load_config(Path(directory) / CONFIG_FILENAME)
+        runs.append((run_config.rr_scale, run_config, read_result(directory, pusher)))
+    runs.sort(key=lambda run: run[0])
+    scales = [s for s, _, _ in runs]
+    if len(set(scales)) != len(scales):
+        raise ValueError(f"Two runs have the same s: {scales}")
+
+    reference_case, reference_field = _physical_case(runs[0][1])
+    reference_times = scales[0] * runs[0][2]["time"].values
+    for s, run_config, result in runs[1:]:
+        case, e_physical = _physical_case(run_config)
+        times = s * result["time"].values
+        # E / s and s t are products of stored numbers: equal to rounding.
+        same_field = np.allclose(e_physical, reference_field, rtol=1e-12, atol=0.0)
+        same_times = times.shape == reference_times.shape and np.allclose(
+            times, reference_times, rtol=1e-12, atol=0.0
+        )
+        if case != reference_case or not same_field or not same_times:
+            raise ValueError(
+                f"The run at s = {s:g} is not the case of the run at s = "
+                f"{scales[0]:g}: the configuration (dt included), the physical "
+                "field E / s and the physical output times s t must be the same"
+            )
+
+    gammas = [
+        np.sqrt(1.0 + np.sum(result["u"].values ** 2, axis=-1) / c**2)
+        for _, _, result in runs
+    ]
+    gamma_0 = gammas[0][0]
+    # rms over time of gamma_s' - gamma_s, shape (n_pairs, n_part).
+    differences = np.array(
+        [
+            np.sqrt(np.mean((later - earlier) ** 2, axis=0)) / gamma_0
+            for earlier, later in pairwise(gammas)
+        ]
+    )
+    pair_scales = np.array(scales[:-1])
+
+    with plt.rc_context(figure_style()):
+        figure, axes = plt.subplots()
+        labels = _pitch_angle_labels(runs[0][2])
+        for i in range(differences.shape[1]):
+            axes.plot(
+                pair_scales,
+                differences[:, i],
+                marker="o",
+                color=_LINE_COLORS[i % len(_LINE_COLORS)],
+                label=labels[i],
+            )
+        guide = differences[0, 0] * pair_scales / pair_scales[0]
+        axes.plot(
+            pair_scales,
+            guide,
+            color="0.6",
+            linewidth=1.0,
+            linestyle="--",
+            label=r"$\propto s$",
+        )
+        axes.set_xscale("log")
+        axes.set_yscale("log")
+        axes.set_xlabel(r"scale $s$ of $E$ and $F_R$")
+        axes.set_ylabel(r"rms$_t(\gamma_{s'} - \gamma_s)\,/\,\gamma_0$")
+        duration = reference_times[-1]
+        axes.set_title(
+            rf"{pusher}, {duration * 1.0e3:.3g} ms, $s'$ = next $s$", fontsize=12
+        )
+        axes.legend(fontsize=11)
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.show()
+    return figure
+
+
+# Colour of each case of tokamak_time_traces, where one particle is drawn.
+_CASE_COLORS = {
+    "E and radiation": "black",
+    "E only": "royalblue",
+    "radiation only": "crimson",
+}
+
+
+def _check_tokamak_cases(
+    run_configs: list[config.RunConfig], time_scale: float
+) -> tuple[float, float]:
+    """Check that the runs are one tokamak case but for the forces.
+
+    Returns ``(e0, R0)``: ``e0`` [V/m] is the scaled toroidal field on the axis
+    of the runs that have one (``s`` times the physical field), 0 if none has;
+    ``R0`` [m] is the major radius.
+    """
+    if not np.isfinite(time_scale) or time_scale <= 0.0:
+        raise ValueError(f"time_scale must be finite and > 0, got {time_scale!r}")
+    cases, scaled_fields, major_radii = [], set(), set()
+    for run_config in run_configs:
+        field = run_config.field
+        if field.kind != "carbajal":
+            raise ValueError(
+                f"The run {run_config.name!r} is not in the tokamak field (kind "
+                f"{field.kind!r}, not 'carbajal')"
+            )
+        if run_config.rr_scale > 0.0 and run_config.rr_scale != time_scale:
+            raise ValueError(
+                f"The run {run_config.name!r} has rr_scale {run_config.rr_scale}, "
+                f"not the time_scale {time_scale}: E and F_R must be scaled together"
+            )
+        _force_case(run_config)
+        if field.e0 != 0.0:
+            scaled_fields.add(field.e0)
+        major_radii.add(field.r0)
+        case = run_config.model_dump(exclude={"name", "pusher", "rr_scale"})
+        del case["field"]["e0"]
+        cases.append(case)
+    if len(scaled_fields) > 1 or any(case != cases[0] for case in cases):
+        raise ValueError(
+            "The runs must be one case but for the forces: the same configuration "
+            "(dt, duration, field and initial state), and the same e0 when they have "
+            f"one; got e0 {sorted(scaled_fields)} V/m"
+        )
+    e0 = scaled_fields.pop() if scaled_fields else 0.0
+    return e0, major_radii.pop()
+
+
+def tokamak_time_traces(
+    result_dirs: Sequence[str | Path],
+    time_scale: float,
+    pusher: str = "boris",
+    *,
+    particle: int = 0,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """
+    Draw ``gamma``, the pitch angle and ``P_zeta`` of one electron in the tokamak.
+
+    The runs are one case in the field of Carbajal et al. (2017), computed with the
+    forces multiplied by ``s = time_scale`` (OPEN_POINTS N44); each folder is one
+    choice of forces, read from its configuration: ``E`` and radiation, ``E``
+    only, radiation only (one colour and line style each). Three panels share the
+    physical time ``s t``, in ms:
+
+    - the Lorentz factor ``gamma``;
+    - the pitch angle ``theta`` between ``u`` and the local ``B``, in degrees; it
+      oscillates along the orbit, as ``B`` changes;
+    - the change of the canonical toroidal momentum, ``Delta P_zeta / (R0 c)``,
+      dimensionless (about the change of ``gamma`` for an electron along ``B``).
+      The grey dashed line is the torque of ``E`` alone, ``(q / m) e0 t / c``
+      (RAPPORT 5.57, ``e0`` the field of the ``.yaml``); the difference is the
+      torque of the radiation force.
+
+    ``P_zeta`` is computed by ``diagnostics.canonical_toroidal_momentum`` from the
+    stored ``x``, ``u`` and ``Psi``, at the states ``(x^n, u^n)``.
+
+    Parameters
+    ----------
+    result_dirs : sequence of str or pathlib.Path
+        Results folders given by ``run.pusher`` for a ``carbajal`` field, one per
+        choice of forces.
+    time_scale : float
+        The factor ``s`` on ``E`` and ``F_R`` [dimensionless], > 0.
+    pusher : str, optional
+        The pusher drawn, present in every folder. Default ``"boris"``.
+    particle : int, optional
+        Index of the particle drawn. Default 0.
+    show : bool, optional
+        Open the figure in a window. Default ``True``.
+    save_path : str or pathlib.Path, optional
+        If given, the figure is also saved as a PNG and as a PDF (no extension).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure, square, 6 x 6 in, with three panels.
+
+    Raises
+    ------
+    ValueError
+        If ``time_scale`` is not finite and > 0, ``particle`` is not an index of
+        the runs, or the runs are not one tokamak case but for the forces: a field
+        other than ``carbajal``, ``rr_scale`` other than ``time_scale``, another
+        configuration, another ``e0``, a run without any force, or ``pusher``
+        missing from a folder.
+    """
+    run_configs = [
+        config.load_config(Path(directory) / CONFIG_FILENAME)
+        for directory in result_dirs
+    ]
+    e0, r0 = _check_tokamak_cases(run_configs, time_scale)
+    n_part = len(run_configs[0].initial.u0)
+    if isinstance(particle, bool) or not 0 <= particle < n_part:
+        raise ValueError(
+            f"particle must be an index in [0, {n_part}), got {particle!r}"
+        )
+    q, m = run_configs[0].q, run_configs[0].m
+
+    with plt.rc_context(figure_style()):
+        figure, panels = plt.subplots(3, 1, sharex=True)
+        gamma_axes, pitch_axes, momentum_axes = panels
+        for directory, run_config in zip(result_dirs, run_configs, strict=True):
+            result = read_result(directory, pusher)
+            case = _force_case(run_config)
+            style = {
+                "color": _CASE_COLORS[case],
+                "linestyle": _CASE_STYLES[case],
+                "linewidth": 1.0,
+            }
+            time = result["time"].values
+            physical_ms = time_scale * time * 1.0e3
+            x, u = result["x"].values, result["u"].values
+            gamma = np.sqrt(1.0 + np.sum(u[:, particle] ** 2, axis=-1) / c**2)
+            p_par, p_perp = _parallel_and_perpendicular_mev(
+                u[:, particle], result["b_field"].values[:, particle], m
+            )
+            p_zeta = diagnostics.canonical_toroidal_momentum(
+                x, u, result["poloidal_flux"].values, q, m
+            )[:, particle]
+            gamma_axes.plot(physical_ms, gamma, label=case, **style)
+            pitch_axes.plot(physical_ms, np.degrees(np.arctan2(p_perp, p_par)), **style)
+            momentum_axes.plot(physical_ms, (p_zeta - p_zeta[0]) / (r0 * c), **style)
+        if e0 != 0.0:
+            momentum_axes.plot(
+                physical_ms,
+                (q / m) * e0 * time / c,
+                color="0.6",
+                linestyle="--",
+                linewidth=1.0,
+                label=r"torque of $E$ alone",
+            )
+            momentum_axes.legend(fontsize=10)
+        gamma_axes.set_ylabel(r"$\gamma$")
+        pitch_axes.set_ylabel(r"$\theta$ [deg]")
+        momentum_axes.set_ylabel(r"$\Delta P_\zeta / (R_0 c)$")
+        momentum_axes.set_xlabel(r"physical time $s\,t$ [ms]")
+        gamma_axes.legend(fontsize=10)
+        theta_0 = _pitch_angle_labels(result)[particle]
+        title = f"{pusher}, {theta_0}, $s$ = {time_scale:.3g}"
+        gamma_axes.set_title(title, fontsize=12)
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.show()
+    return figure
+
+
+# Rows of the ensemble figures, in the order of Carbajal et al. (2017, Fig. 12).
+_CASE_ORDER = ("radiation only", "E only", "E and radiation")
+
+# The electrons of one ensemble share one pitch angle and one energy (Carbajal et
+# al. 2017, Sec. III.D): built from these two values, they differ by rounding only,
+# about 1e-15. 1e-9 (radians, and relative on the energy) is far above it, and far
+# below the spacing of the ensembles, several degrees.
+_ENSEMBLE_SPREAD_TOLERANCE = 1.0e-9
+
+
+class _FinalEnsemble(NamedTuple):
+    """Final state of one ensemble of electrons under one choice of forces.
+
+    Angles are in degrees, energies and momenta (``p c``) in MeV. The final arrays
+    hold the confined electrons only; ``n_lost`` counts the others.
+    """
+
+    case: str
+    pitch_angle_0: float
+    kinetic_energy_0: float
+    pitch_angle: NDArray[np.float64]
+    kinetic_energy: NDArray[np.float64]
+    p_par: NDArray[np.float64]
+    p_perp: NDArray[np.float64]
+    n_lost: int
+
+
+def _final_ensembles(
+    result_dirs: Sequence[str | Path],
+    time_scale: float,
+    r_edge: float,
+    pusher: str,
+) -> list[_FinalEnsemble]:
+    """Read the final state of ensembles of electrons run in the tokamak.
+
+    The runs are the plan of Carbajal et al. (2017, Fig. 12): ensembles of one
+    pitch angle and one energy, each run with several choices of forces (``E``
+    and radiation, ``E`` only, radiation only) multiplied by ``s = time_scale``.
+    The runs of one ensemble start from the same state, so that the same electrons
+    are compared. The pitch angle is measured from the stored local ``B``. The
+    electrons lost at one saved state at least (``diagnostics.is_lost``) are left
+    out of the final arrays and counted.
+
+    Parameters
+    ----------
+    result_dirs : sequence of str or pathlib.Path
+        Results folders given by ``run.pusher`` for a ``carbajal`` field.
+    time_scale : float
+        The factor ``s`` on ``E`` and ``F_R`` [dimensionless], > 0.
+    r_edge : float
+        Minor radius of the edge of the plasma [m], in ``(0, R0)``.
+    pusher : str
+        The pusher read, present in every folder.
+
+    Returns
+    -------
+    list of _FinalEnsemble
+        One per folder, sorted by case (radiation only, ``E`` only, both) and then
+        by initial pitch angle.
+
+    Raises
+    ------
+    ValueError
+        If no folder is given, ``time_scale`` is not finite and > 0, a run is not
+        in the ``carbajal`` field, has ``rr_scale`` other than 0 and
+        ``time_scale`` or no force at all, the runs differ by anything but their
+        forces, time step and initial state (field, ``e0`` when not 0, particle,
+        physical duration ``s t``), one ensemble is run twice with the same forces
+        or not with the same choices of forces as the others, an ensemble has more
+        than one pitch angle or energy, ``r_edge`` is refused by
+        ``diagnostics.is_lost``, or ``pusher`` is missing from a folder.
+    """
+    if not np.isfinite(time_scale) or time_scale <= 0.0:
+        raise ValueError(f"time_scale must be finite and > 0, got {time_scale!r}")
+    run_configs = [
+        config.load_config(Path(directory) / CONFIG_FILENAME)
+        for directory in result_dirs
+    ]
+    if not run_configs:
+        raise ValueError("No results folder given")
+
+    shared_parts, scaled_fields, physical_durations = [], set(), []
+    for run_config in run_configs:
+        field = run_config.field
+        if field.kind != "carbajal":
+            raise ValueError(
+                f"The run {run_config.name!r} is not in the tokamak field (kind "
+                f"{field.kind!r}, not 'carbajal')"
+            )
+        if run_config.rr_scale > 0.0 and run_config.rr_scale != time_scale:
+            raise ValueError(
+                f"The run {run_config.name!r} has rr_scale {run_config.rr_scale}, "
+                f"not the time_scale {time_scale}: E and F_R must be scaled together"
+            )
+        _force_case(run_config)
+        if field.e0 != 0.0:
+            scaled_fields.add(field.e0)
+        r0 = field.r0  # the same for all the runs, checked below with the field
+        shared = run_config.model_dump(
+            exclude={
+                "name",
+                "pusher",
+                "rr_scale",
+                "dt",
+                "n_steps",
+                "save_every",
+                "seed",
+                "initial",
+            }
+        )
+        del shared["field"]["e0"]
+        shared_parts.append(shared)
+        physical_durations.append(time_scale * run_config.dt * run_config.n_steps)
+    if len(scaled_fields) > 1 or any(part != shared_parts[0] for part in shared_parts):
+        raise ValueError(
+            "The runs must differ by their forces, time step and initial state only: "
+            "the same field, the same e0 when they have one, the same particle; got "
+            f"e0 {sorted(scaled_fields)} V/m"
+        )
+    # Each duration is one product of the .yaml values: rounding, about 1e-16.
+    if not np.allclose(physical_durations, physical_durations[0], rtol=1e-12, atol=0):
+        raise ValueError(
+            "The runs must last the same physical time s t; got "
+            f"{sorted(set(physical_durations))} s"
+        )
+
+    # One ensemble is one initial state; its runs are indexed by their case.
+    ensembles: list[tuple[dict[str, Any], dict[str, int]]] = []
+    for index, run_config in enumerate(run_configs):
+        initial = run_config.initial.model_dump()
+        runs_of_ensemble = [runs for state, runs in ensembles if state == initial]
+        if runs_of_ensemble:
+            runs = runs_of_ensemble[0]
+        else:
+            runs = {}
+            ensembles.append((initial, runs))
+        case = _force_case(run_config)
+        if case in runs:
+            raise ValueError(
+                f"The runs {run_configs[runs[case]].name!r} and {run_config.name!r} "
+                f"are the same ensemble with the same forces ({case})"
+            )
+        runs[case] = index
+    cases_run = set(ensembles[0][1])
+    if any(set(runs) != cases_run for _, runs in ensembles):
+        raise ValueError(
+            "Every ensemble must be run with the same choices of forces, from the same "
+            f"initial state; got {[sorted(runs) for _, runs in ensembles]}"
+        )
+
+    m = run_configs[0].m
+    final_ensembles = []
+    for index, run_config in enumerate(run_configs):
+        result = read_result(result_dirs[index], pusher)
+        x, u = result["x"].values, result["u"].values
+        b_field = result["b_field"].values
+        p_par, p_perp = _parallel_and_perpendicular_mev(u[[0, -1]], b_field[[0, -1]], m)
+        pitch_angle = np.arctan2(p_perp, p_par)
+        kinetic_energy = diagnostics.kinetic_energy(u[[0, -1]], m) / _JOULES_PER_MEV
+        pitch_spread = np.ptp(pitch_angle[0])
+        energy_spread = np.ptp(kinetic_energy[0]) / np.max(kinetic_energy[0])
+        if max(pitch_spread, energy_spread) > _ENSEMBLE_SPREAD_TOLERANCE:
+            raise ValueError(
+                f"The run {run_config.name!r} is not one ensemble: its electrons "
+                "start with several pitch angles or energies"
+            )
+        confined = ~diagnostics.is_lost(x, r0, r_edge)
+        final_ensembles.append(
+            _FinalEnsemble(
+                case=_force_case(run_config),
+                pitch_angle_0=float(np.degrees(pitch_angle[0, 0])),
+                kinetic_energy_0=float(kinetic_energy[0, 0]),
+                pitch_angle=np.degrees(pitch_angle[1, confined]),
+                kinetic_energy=kinetic_energy[1, confined],
+                p_par=p_par[1, confined],
+                p_perp=p_perp[1, confined],
+                n_lost=int(np.count_nonzero(~confined)),
+            )
+        )
+    final_ensembles.sort(
+        key=lambda ensemble: (_CASE_ORDER.index(ensemble.case), ensemble.pitch_angle_0)
+    )
+    return final_ensembles
+
+
+def final_distributions(
+    result_dirs: Sequence[str | Path],
+    time_scale: float,
+    r_edge: float,
+    quantity: Literal["pitch", "energy"],
+    pusher: str = "boris",
+    *,
+    n_bins: int = 40,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """
+    Draw the distribution of the pitch angle or energy of ensembles at the end.
+
+    This is a column of Fig. 12 of Carbajal et al. (2017): ``f(theta)``, their
+    Eq. 9 (panels b, e, h), or ``f(E)`` of the kinetic energy, their Eq. 17
+    (panels c, f, i). Each folder is one ensemble of electrons of one initial
+    pitch angle ``theta_0`` and energy ``E_0`` under one choice of forces,
+    multiplied by ``s = time_scale`` (OPEN_POINTS N44). One panel per choice of
+    forces, in their order: radiation only, ``E`` only, both. In each, one
+    probability density per ensemble, normalised to 1 over its confined
+    electrons, with the same bins in every panel; its initial value is dotted,
+    in its colour. The lost electrons (``diagnostics.is_lost``, at one saved state
+    at least) are left out and counted in the legend.
+
+    The pitch angle is measured from the local ``B`` stored with each state.
+
+    Parameters
+    ----------
+    result_dirs : sequence of str or pathlib.Path
+        Results folders given by ``run.pusher`` for a ``carbajal`` field: each
+        ensemble with the same choices of forces, from the same initial state.
+    time_scale : float
+        The factor ``s`` on ``E`` and ``F_R`` [dimensionless], > 0.
+    r_edge : float
+        Minor radius of the edge of the plasma [m], in ``(0, R0)``.
+    quantity : {"pitch", "energy"}
+        The pitch angle ``theta`` [deg] or the kinetic energy [MeV] at the end.
+    pusher : str, optional
+        The pusher drawn, present in every folder. Default ``"boris"``.
+    n_bins : int, optional
+        Number of bins, spanning all the final values of all the panels, at
+        least 1. Default 40.
+    show : bool, optional
+        Open the figure in a window. Default ``True``.
+    save_path : str or pathlib.Path, optional
+        If given, the figure is also saved as a PNG and as a PDF (no extension).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure, square, 6 x 6 in, with one panel per choice of forces.
+
+    Raises
+    ------
+    ValueError
+        If ``quantity`` is not ``"pitch"`` or ``"energy"``, ``n_bins`` is not an
+        integer >= 1, no electron is confined, or the runs are refused by
+        ``_final_ensembles`` (not one plan of ensembles and forces).
+    """
+    if quantity not in ("pitch", "energy"):
+        raise ValueError(f"quantity must be 'pitch' or 'energy', got {quantity!r}")
+    if isinstance(n_bins, bool) or not isinstance(n_bins, int) or n_bins < 1:
+        raise ValueError(f"n_bins must be an integer >= 1, got {n_bins!r}")
+    ensembles = _final_ensembles(result_dirs, time_scale, r_edge, pusher)
+
+    if quantity == "pitch":
+        final_values = [ensemble.pitch_angle for ensemble in ensembles]
+        initial_values = [ensemble.pitch_angle_0 for ensemble in ensembles]
+    else:
+        final_values = [ensemble.kinetic_energy for ensemble in ensembles]
+        initial_values = [ensemble.kinetic_energy_0 for ensemble in ensembles]
+    all_values = np.concatenate(final_values)
+    if all_values.size == 0:
+        raise ValueError("No electron is confined: there is no distribution to draw")
+    edges = np.histogram_bin_edges(all_values, bins=n_bins)
+    cases_run = {ensemble.case for ensemble in ensembles}
+    cases = [case for case in _CASE_ORDER if case in cases_run]
+    pitch_angles_0 = sorted({ensemble.pitch_angle_0 for ensemble in ensembles})
+
+    with plt.rc_context(figure_style()):
+        figure, panels = plt.subplots(len(cases), 1, sharex=True, squeeze=False)
+        for axes, case in zip(panels[:, 0], cases, strict=True):
+            for ensemble, values, value_0 in zip(
+                ensembles, final_values, initial_values, strict=True
+            ):
+                if ensemble.case != case:
+                    continue
+                color = _LINE_COLORS[pitch_angles_0.index(ensemble.pitch_angle_0)]
+                label = rf"$\theta_0 = {ensemble.pitch_angle_0:.0f}^\circ$"
+                if ensemble.n_lost > 0:
+                    label += f", {ensemble.n_lost} lost"
+                if values.size > 0:
+                    density, _ = np.histogram(values, bins=edges, density=True)
+                    axes.stairs(density, edges, color=color, label=label)
+                axes.axvline(value_0, color=color, linestyle=":", linewidth=1.0)
+            axes.legend(title=case, fontsize=9, title_fontsize=10)
+            if quantity == "pitch":
+                axes.set_ylabel(r"$f(\theta)$ [1/deg]")
+            else:
+                axes.set_ylabel(r"$f(\mathcal{E})$ [1/MeV]")
+        if quantity == "pitch":
+            panels[-1, 0].set_xlabel(r"final pitch angle $\theta$ [deg]")
+        else:
+            panels[-1, 0].set_xlabel(r"final kinetic energy $\mathcal{E}$ [MeV]")
+        panels[0, 0].set_title(f"{pusher}, $s$ = {time_scale:.3g}", fontsize=12)
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.show()
+    return figure
+
+
+def final_momentum_cloud(
+    result_dirs: Sequence[str | Path],
+    time_scale: float,
+    r_edge: float,
+    pusher: str = "boris",
+    *,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """
+    Draw the final momenta of ensembles of electrons in the plane ``(p_par, p_perp)``.
+
+    This is the first column of Fig. 12 of Carbajal et al. (2017, panels a, d, g):
+    one point per confined electron at the end, ``p_par c`` and ``p_perp c`` in
+    MeV, measured from the local ``B`` stored with each state. Each folder is one
+    ensemble of electrons of one initial pitch angle ``theta_0`` and energy ``E_0``
+    under one choice of forces, multiplied by ``s = time_scale`` (OPEN_POINTS
+    N44). One panel per choice of forces, in their order: radiation only, ``E``
+    only, both; one colour per ensemble. The grey dotted lines are the arc of the
+    initial momentum ``|p| c = p_0 c`` and the rays ``theta = theta_0``: they
+    cross at the initial state of each ensemble. Points inside the arc lost
+    energy; points below their ray turned towards ``B``. The lost electrons
+    (``diagnostics.is_lost``) are left out and counted in the legend.
+
+    Parameters
+    ----------
+    result_dirs : sequence of str or pathlib.Path
+        Results folders given by ``run.pusher`` for a ``carbajal`` field: each
+        ensemble with the same choices of forces, from the same initial state.
+    time_scale : float
+        The factor ``s`` on ``E`` and ``F_R`` [dimensionless], > 0.
+    r_edge : float
+        Minor radius of the edge of the plasma [m], in ``(0, R0)``.
+    pusher : str, optional
+        The pusher drawn, present in every folder. Default ``"boris"``.
+    show : bool, optional
+        Open the figure in a window. Default ``True``.
+    save_path : str or pathlib.Path, optional
+        If given, the figure is also saved as a PNG and as a PDF (no extension).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure, square, 6 x 6 in, with one panel per choice of forces.
+
+    Raises
+    ------
+    ValueError
+        If no electron is confined, or the runs are refused by
+        ``_final_ensembles`` (not one plan of ensembles and forces).
+    """
+    ensembles = _final_ensembles(result_dirs, time_scale, r_edge, pusher)
+    if all(ensemble.p_par.size == 0 for ensemble in ensembles):
+        raise ValueError("No electron is confined: there is no momentum to draw")
+    cases_run = {ensemble.case for ensemble in ensembles}
+    cases = [case for case in _CASE_ORDER if case in cases_run]
+    pitch_angles_0 = sorted({ensemble.pitch_angle_0 for ensemble in ensembles})
+    # p_0 c = sqrt(E_0 (E_0 + 2 m c^2)), with E_0 the kinetic energy (MeV here).
+    m = config.load_config(Path(result_dirs[0]) / CONFIG_FILENAME).m
+    rest_energy = m * c**2 / _JOULES_PER_MEV
+    energies_0 = sorted({ensemble.kinetic_energy_0 for ensemble in ensembles})
+    momenta_0 = [
+        np.sqrt(energy * (energy + 2.0 * rest_energy)) for energy in energies_0
+    ]
+    reference_style = {"color": "0.6", "linestyle": ":", "linewidth": 1.0}
+
+    with plt.rc_context(figure_style()):
+        figure, panels = plt.subplots(
+            len(cases), 1, sharex=True, sharey=True, squeeze=False
+        )
+        for axes, case in zip(panels[:, 0], cases, strict=True):
+            for ensemble in ensembles:
+                if ensemble.case != case:
+                    continue
+                label = rf"$\theta_0 = {ensemble.pitch_angle_0:.0f}^\circ$"
+                if ensemble.n_lost > 0:
+                    label += f", {ensemble.n_lost} lost"
+                axes.scatter(
+                    ensemble.p_par,
+                    ensemble.p_perp,
+                    s=2,
+                    color=_LINE_COLORS[pitch_angles_0.index(ensemble.pitch_angle_0)],
+                    label=label,
+                    rasterized=True,
+                )
+            axes.legend(title=case, fontsize=9, title_fontsize=10, markerscale=4)
+            axes.set_ylabel(r"$p_\perp c$ [MeV]")
+        panels[-1, 0].set_xlabel(r"$p_\parallel c$ [MeV]")
+        panels[0, 0].set_title(f"{pusher}, $s$ = {time_scale:.3g}", fontsize=12)
+
+        # The references are drawn after the points, then the limits of the points
+        # are restored, so that the rays do not stretch the axes.
+        x_limits, y_limits = panels[0, 0].get_xlim(), panels[0, 0].get_ylim()
+        ray_length = 2.0 * max(abs(np.array([*x_limits, *y_limits])))
+        arc_angle = np.linspace(0.0, np.pi / 2.0, 200)
+        for axes in panels[:, 0]:
+            for momentum_0 in momenta_0:
+                axes.plot(
+                    momentum_0 * np.cos(arc_angle),
+                    momentum_0 * np.sin(arc_angle),
+                    **reference_style,
+                )
+            for pitch_angle_0 in pitch_angles_0:
+                direction = np.radians(pitch_angle_0)
+                axes.plot(
+                    [0.0, ray_length * np.cos(direction)],
+                    [0.0, ray_length * np.sin(direction)],
+                    **reference_style,
+                )
+        panels[0, 0].set_xlim(x_limits)
+        panels[0, 0].set_ylim(y_limits)
 
     if save_path is not None:
         save_figure(figure, save_path)
