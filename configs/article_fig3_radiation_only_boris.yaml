@@ -1,0 +1,15 @@
+name: article_fig3_radiation_only
+pusher: boris
+dt: 6.4952486504382965e-12
+n_steps: 1539580
+save_every: 10
+seed: 42
+q: -1.602176634e-19
+m: 9.1093837139e-31
+rr_scale: 1000.0
+field: {kind: carbajal, b0: 2.19, r0: 1.5, q0: 1.6, lam: 1.0, e0: 0.0}
+initial:
+  x0:
+  - [0.0, 1.55, 0.0]
+  u0:
+  - [20329829297.692333, 0.0, 12307582361.222286]

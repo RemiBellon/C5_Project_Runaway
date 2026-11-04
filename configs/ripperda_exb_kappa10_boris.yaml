@@ -1,0 +1,24 @@
+# Roadmap B3, full resolution: relativistic E x B drift of Ripperda et al. (2018,
+# Sec. 3.1.4), kappa = 10. An electron starts from rest in E = E0 x, B = B0 z with
+# E0 / (c B0) = 1 - 5e-3. In the units of the paper (time in 1 / Omega_0,
+# Omega_0 = |q| B0 / m): dt = 0.0005, duration 2 pi 1e4 (9.96 gyrations).
+# 125664000 steps: about one hour for this pusher at 30 microseconds per step.
+# The pytest version uses 125 000 steps (OPEN_POINTS N24).
+name: ripperda_exb_kappa10
+pusher: boris
+dt: 1.1371260222610388e-15            # [s] = 0.0005 / Omega_0
+n_steps: 125664000
+save_every: 125664             # 1001 saved states
+seed: 42
+
+q: -1.602176634e-19    # electron [C]
+m: 9.1093837139e-31     # [kg]
+
+field:
+  kind: uniform_cartesian
+  b_field: [0.0, 0.0, 2.5]            # [T]
+  e_field: [745733739.275, 0.0, 0.0]   # [V/m] = (1 - 5e-3) c B0
+
+initial:
+  x0: [[0.0, 0.0, 0.0]]   # [m]
+  u0: [[0.0, 0.0, 0.0]]   # [m/s], at rest

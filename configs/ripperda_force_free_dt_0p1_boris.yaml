@@ -1,0 +1,24 @@
+# Roadmap B4: force-free case of Ripperda et al. (2018, Sec. 3.1.3, Table 2 and
+# Fig. 5). A particle of Lorentz factor 1e6 moves along y in B = B z and
+# E = -v x B: the Lorentz force is zero, x must stay 0. Units of the paper, used as
+# they are: q = 1 C, m = 1 kg, B = 1 T, so Omega_0 = 1 rad/s; duration 1e5 s.
+# dt = 0.1 s: 1000000 steps, about 30 seconds for this pusher.
+# The quantity of Table 2 is |x| at the last saved time (OPEN_POINTS N25).
+name: ripperda_force_free_dt_0p1
+pusher: boris
+dt: 0.1                 # [s]
+n_steps: 1000000
+save_every: 1000          # 1001 saved states
+seed: 42
+
+q: 1.0    # [C], as in the paper (not an electron)
+m: 1.0    # [kg]
+
+field:
+  kind: uniform_cartesian
+  b_field: [0.0, 0.0, 1.0]                     # [T]
+  e_field: [-299792457.9998501, 0.0, 0.0]   # [V/m] = -v B, written with all its digits
+
+initial:
+  x0: [[0.0, 0.0, 0.0]]                        # [m]
+  u0: [[0.0, 299792457999850.1, 0.0]]    # [m/s] = gamma v, gamma = 1e6
