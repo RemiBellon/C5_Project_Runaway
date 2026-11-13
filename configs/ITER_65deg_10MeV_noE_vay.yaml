@@ -1,0 +1,15 @@
+name: ITER_65deg_10MeV_noE
+pusher: vay
+dt: 4.763182343654751e-12
+n_steps: 2099000
+save_every: 1000
+seed: 42
+q: -1.602176634e-19
+m: 9.1093837139e-31
+rr_scale: 1000.0
+field: {kind: carbajal, b0: 5.3, r0: 6.2, q0: 1.6, lam: 4.0, e0: 0.0}
+initial:
+  x0:
+  - [0.0, 6.25, 0.0]
+  u0:
+  - [2574865190.062686, 0.0, 5595262120.204392]

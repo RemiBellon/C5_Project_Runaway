@@ -77,6 +77,59 @@ def test_orbit_is_saved_as_a_png_and_a_pdf(result_dir, tmp_path):
     plt.close(figure)
 
 
+def test_velocity_draws_physical_components_and_honors_plot_options(
+    result_dir, tmp_path, monkeypatch
+):
+    directory, _ = result_dir
+    time = 1.0e-11 * np.arange(3)
+    proper_velocity = np.array(
+        [
+            [[0.0, c / 2.0, 0.0]],
+            [[c / 2.0, 0.0, 0.0]],
+            [[0.0, 0.0, c / 3.0]],
+        ]
+    )
+    positions = np.zeros((3, 1, 3))
+    write_result(
+        directory,
+        "velocity_test",
+        time,
+        positions,
+        proper_velocity,
+        1.0e-12,
+        b_field=positions,
+    )
+    show_calls = []
+    monkeypatch.setattr(plotting.plt, "show", lambda: show_calls.append(True))
+
+    figure = plotting.velocity(
+        directory,
+        pusher="velocity_test",
+        show=False,
+        save_path=tmp_path / "velocity",
+    )
+
+    gamma = np.sqrt(1.0 + np.sum(proper_velocity**2, axis=-1) / c**2)
+    expected_velocity = proper_velocity / gamma[:, :, np.newaxis]
+    assert len(figure.axes[0].lines) == 3
+    for component, line in enumerate(figure.axes[0].lines):
+        np.testing.assert_array_equal(line.get_xdata(), time)
+        np.testing.assert_allclose(
+            line.get_ydata(), expected_velocity[:, 0, component]
+        )
+    assert [line.get_label() for line in figure.axes[0].lines] == [
+        "$v_x$",
+        "$v_y$",
+        "$v_z$",
+    ]
+    assert figure.axes[0].get_xlabel() == "Time [s]"
+    assert figure.axes[0].get_ylabel() == "Velocity [m/s]"
+    assert (tmp_path / "velocity.png").stat().st_size > 0
+    assert (tmp_path / "velocity.pdf").stat().st_size > 0
+    assert not show_calls
+    plt.close(figure)
+
+
 def test_orbit_uses_the_common_style(result_dir, tmp_path):
     # Truth: the specification of the style, 6 x 6 in figure, 300 dpi export, labels
     # at least 14 pt, full frame, ticks on the left and right sides.

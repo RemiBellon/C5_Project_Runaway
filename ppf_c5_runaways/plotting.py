@@ -17,6 +17,7 @@ from numpy.typing import NDArray
 import ppf_c5_runaways.config as config
 from ppf_c5_runaways import diagnostics, radiation
 from ppf_c5_runaways.constants import c, e
+from ppf_c5_runaways.guiding_centre import guiding_centre_from_position
 from ppf_c5_runaways.io import CONFIG_FILENAME, list_results, read_result
 
 # Lengths are computed in metres, and shown in millimetres because a Larmor radius in
@@ -2969,6 +2970,189 @@ def final_momentum_cloud(
                 )
         panels[0, 0].set_xlim(x_limits)
         panels[0, 0].set_ylim(y_limits)
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.show()
+    return figure
+
+
+def velocity(
+    result_dir: str | Path,
+    pusher: str = "boris",
+    *,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """Draw the physical velocity components of every particle over time."""
+    result = read_result(result_dir, pusher)
+    proper_velocity = result["u"].values
+    #gamma = np.sqrt(1.0 + np.sum(proper_velocity**2, axis=-1) / c**2)
+    #velocity = proper_velocity / gamma[:, :, np.newaxis]
+    time = result["time"].values
+    component_names = ("x", "y", "z")
+
+    with plt.rc_context(figure_style()):
+        figure, axes = plt.subplots()
+        for particle in range(proper_velocity.shape[1]):
+            for component, name in enumerate(component_names):
+                label = rf"$u_{name}$"
+                if proper_velocity.shape[1] > 1:
+                    label += f" (particle {particle + 1})"
+                axes.plot(time, proper_velocity[:, particle, component], label=label)
+        axes.set_xlabel("Time [s]")
+        axes.set_ylabel("Proper Velocity [m/s]")
+        axes.set_title(f"Velocity components for {pusher} pusher")
+        axes.legend()
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.show()
+    return figure
+
+
+
+def orbit_guiding_centre_3D(result_dir: str | Path,
+    pusher: str | Sequence[str] | None = None,
+    *,
+    r0: float | None = None,
+    a: float | None = None,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """
+    Draw the 3D trajectory of each particle, optionally with a reference torus.
+
+    The figure uses the common style of ``figure_style``. To compare schemes, give
+    the folder where several pushers were run (see ``run.pusher``): each pusher is
+    drawn on the same axes, with its own line style, and the legend names it.
+
+    Parameters
+    ----------
+    result_dir : str or pathlib.Path
+        Results folder given by ``run.pusher``.
+    pusher : str or sequence of str, optional
+        Which pusher(s) of the folder to draw, for example ``"boris"`` or
+        ``["boris", "vay"]``. Default: all the pushers stored in the folder.
+    r0 : float, optional
+        Major radius [m] of a reference torus surface to draw alongside the
+        trajectories, semi-transparent. Omit to draw the trajectories alone.
+    a : float, optional
+        Minor radius [m] of the reference torus. Required if ``r0`` is given.
+    show : bool, optional
+        Open the figure in a window. Default ``True``. Use ``False`` in a script that
+        only saves the figure.
+    save_path : str or pathlib.Path, optional
+        If given, the figure is also saved as a PNG and as a PDF, with
+        ``save_figure``. This is a file name without extension: ``"orbit"`` writes
+        ``orbit.png`` and ``orbit.pdf`` (``"orbit.png"`` gives the same two files).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure, square, 7 x 7 in.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no pusher is given and the folder holds no trajectories.
+    ValueError
+        If a pusher is not in the folder, or ``a`` is missing while ``r0`` is given.
+    """
+    if pusher is None:
+        names = list_results(result_dir)
+        if not names:
+            raise FileNotFoundError(
+                f"No trajectories in {result_dir}: has a simulation been run in this "
+                "folder?"
+            )
+    elif isinstance(pusher, str):
+        names = [pusher]
+    else:
+        names = list(pusher)
+    results = {name: read_result(result_dir, name) for name in names}
+
+    if r0 is not None and a is None:
+        raise ValueError("a (minor radius) is required when r0 is given")
+
+    with plt.rc_context(figure_style()):
+        figure = plt.figure(figsize=(7, 7))
+        axes = figure.add_subplot(111, projection="3d")
+
+        # --- Optional reference torus surface, drawn first so it sits behind ---
+        if r0 is not None:
+            r0_mm = r0 * _METRES_TO_MILLIMETRES
+            a_mm = a * _METRES_TO_MILLIMETRES
+            theta_grid, phi_grid = np.meshgrid(
+                np.linspace(0, 2 * np.pi, 60), np.linspace(0, 2 * np.pi, 100)
+            )
+            big_r = r0_mm + a_mm * np.cos(theta_grid)
+            xt = big_r * np.cos(phi_grid)
+            yt = big_r * np.sin(phi_grid)
+            zt = a_mm * np.sin(theta_grid)
+            axes.plot_surface(
+                xt, yt, zt, color="lightgray", alpha=0.25, linewidth=0, shade=True
+            )
+
+        # --- Trajectories, same convention as orbit_xz ---
+        all_x = []
+        for k, (name, result) in enumerate(results.items()):
+            x = result["x"].values  # (n_saved, n_part, 3), in metres
+            gc = (
+                guiding_centre_from_position(
+                    x, result["u"].values, result["b_field"].values
+                )
+                * _METRES_TO_MILLIMETRES
+            )
+            all_x.append(x)
+            n_part = x.shape[1]
+            for i in range(n_part):
+                if len(results) == 1:
+                    label = f"particle {i}"
+                elif n_part == 1:
+                    label = name
+                else:
+                    label = f"{name}, particle {i}"
+                (line,) = axes.plot(
+                    gc[:, i, 0],
+                    gc[:, i, 1],
+                    gc[:, i, 2],
+                    linestyle=_LINE_STYLES[k % len(_LINE_STYLES)],
+                    label=label,
+                )
+                axes.plot(
+                    [gc[0, i, 0]],
+                    [gc[0, i, 1]],
+                    [gc[0, i, 2]],
+                    "o",
+                    color=line.get_color(),
+                )
+
+        if r0 is not None:
+            theta = np.linspace(0, 2 * np.pi, 100)
+            axes.plot(r0_mm * np.cos(theta), r0_mm * np.sin(theta), "--")
+        axes.set_xlabel("x [mm]")
+        axes.set_ylabel("y [mm]")
+        axes.set_zlabel("z [mm]")
+        dt = next(iter(results.values())).attrs["dt"]
+        if len(results) == 1:
+            title = f"3D guiding orbit, pusher {names[0]!r}, dt = {dt:.3g} s"
+        else:
+            title = f"3D guiding orbit, dt = {dt:.3g} s"
+        axes.set_title(title)
+
+        # Equal aspect ratio: matplotlib 3D does not do this automatically.
+        # stacked = np.concatenate(all_x, axis=0).reshape(-1, 3)
+        # centre = (stacked.max(axis=0) + stacked.min(axis=0)) / 2
+        # half_range = (stacked.max(axis=0) - stacked.min(axis=0)).max() / 2
+        # axes.set_xlim(centre[0] - half_range, centre[0] + half_range)
+        # axes.set_ylim(centre[1] - half_range, centre[1] + half_range)
+        # axes.set_zlim(centre[2] - half_range, centre[2] + half_range)
+
+        if len(axes.get_legend_handles_labels()[0]) > 1:
+            axes.legend()
 
     if save_path is not None:
         save_figure(figure, save_path)
