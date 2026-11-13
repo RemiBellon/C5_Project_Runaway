@@ -12,8 +12,9 @@ matplotlib.use("Agg")  # draw in memory: no window opens during the tests
 import matplotlib.pyplot as plt
 
 from ppf_c5_runaways import plotting
-from ppf_c5_runaways.config import RunConfig, load_config
+from ppf_c5_runaways.config import RunConfig, load_config, save_config
 from ppf_c5_runaways.constants import c
+from ppf_c5_runaways.guiding_centre import guiding_centre_from_position
 from ppf_c5_runaways.io import CONFIG_FILENAME, create_result_dir, write_result
 
 
@@ -74,6 +75,90 @@ def test_orbit_is_saved_as_a_png_and_a_pdf(result_dir, tmp_path):
 
     assert (tmp_path / "orbit.png").stat().st_size > 0
     assert (tmp_path / "orbit.pdf").stat().st_size > 0
+    plt.close(figure)
+
+
+def test_orbit_poloidal_gc_draws_guiding_centre_projection(result_dir):
+    directory, positions = result_dir
+    positions = positions.copy()
+    positions[:, 0, 2] = np.linspace(-1.0e-3, 1.0e-3, positions.shape[0])
+    proper_velocity = np.zeros_like(positions)
+    proper_velocity[:, 0, 1] = 1.0e7
+    b_field = np.zeros_like(positions)
+    b_field[:, 0, 2] = 2.5
+    write_result(
+        directory,
+        "vay",
+        1.0e-11 * np.arange(11),
+        positions,
+        proper_velocity,
+        1.0e-12,
+        b_field=b_field,
+    )
+
+    figure = plotting.orbit_poloidal_gc(directory, pusher="vay", show=False)
+
+    line = figure.axes[0].lines[0]
+    run_config = load_config(directory / CONFIG_FILENAME)
+    guiding_centre = guiding_centre_from_position(
+        positions,
+        proper_velocity,
+        b_field,
+        q=run_config.q,
+        m=run_config.m,
+    )
+    np.testing.assert_allclose(
+        line.get_xdata(), np.hypot(guiding_centre[:, 0, 0], guiding_centre[:, 0, 1])
+    )
+    np.testing.assert_allclose(line.get_ydata(), guiding_centre[:, 0, 2])
+    assert figure.axes[0].get_xlabel() == "R [m]"
+    assert figure.axes[0].get_ylabel() == "Z [m]"
+    plt.close(figure)
+
+
+def test_visu_toroidal_fields_loads_config_path_and_draws_both_panels(
+    tmp_path, monkeypatch
+):
+    run_config = RunConfig(
+        name="field_visualization",
+        pusher="boris",
+        dt=1.0e-12,
+        n_steps=10,
+        save_every=1,
+        seed=0,
+        q=-1.602176634e-19,
+        m=9.1093837139e-31,
+        field={
+            "kind": "carbajal",
+            "b0": 2.5,
+            "r0": 3.0,
+            "q0": 1.6,
+            "lam": 1.0,
+            "e0": 0.0,
+        },
+        initial={"x0": [[0.0, 4.0, 0.0]], "u0": [[1.0, 0.0, 0.0]]},
+    )
+    config_path = tmp_path / "field.yaml"
+    save_config(run_config, config_path)
+    show_calls = []
+    monkeypatch.setattr(plotting.plt, "show", lambda: show_calls.append(True))
+
+    figure = plotting.visu_toroidal_fields(
+        config_path,
+        r0=3.0,
+        a=0.5,
+        show=False,
+        save_path=tmp_path / "fields",
+    )
+
+    assert len(figure.axes) == 2
+    assert len(figure.axes[0].collections) == 2
+    profile = figure.axes[1].lines[0]
+    np.testing.assert_allclose(profile.get_xdata()[[0, -1]], [2.5, 3.5])
+    assert np.all(np.isfinite(profile.get_ydata()))
+    assert (tmp_path / "fields.png").is_file()
+    assert (tmp_path / "fields.pdf").is_file()
+    assert not show_calls
     plt.close(figure)
 
 

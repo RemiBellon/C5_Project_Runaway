@@ -15,7 +15,8 @@ from matplotlib.typing import LineStyleType, RcKeyType
 from numpy.typing import NDArray
 
 import ppf_c5_runaways.config as config
-from ppf_c5_runaways import diagnostics, radiation
+from ppf_c5_runaways import diagnostics, fields, radiation
+from ppf_c5_runaways.config import RunConfig, load_config
 from ppf_c5_runaways.constants import c, e
 from ppf_c5_runaways.guiding_centre import guiding_centre_from_position
 from ppf_c5_runaways.io import CONFIG_FILENAME, list_results, read_result
@@ -1576,6 +1577,86 @@ def orbit_poloidal(
     return figure
 
 
+def orbit_poloidal_gc(
+    result_dir: str | Path,
+    pusher: str | Sequence[str] | None = None,
+    *,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """Draw guiding-centre orbits projected onto the poloidal ``(R, Z)`` plane.
+
+    The guiding centre is estimated from the saved particle position, proper
+    velocity and magnetic field. The projection is ``R = sqrt(X^2 + Y^2)`` and
+    ``Z = z``. One colour per particle, labelled with its initial pitch angle; one
+    line style per pusher. For a Carbajal field, the magnetic axis is marked at
+    ``(R0, 0)``.
+
+    Parameters
+    ----------
+    result_dir : str or pathlib.Path
+        Results folder given by ``run.pusher``.
+    pusher : str or sequence of str, optional
+        Which pusher(s) of the folder to draw. Default: all of them.
+    show : bool, optional
+        Open the figure in a window. Default ``True``.
+    save_path : str or pathlib.Path, optional
+        If given, save the figure as a PNG and PDF (no extension).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The square figure showing the guiding-centre orbits.
+    """
+    results = _read_selected(result_dir, pusher)
+    run_config = config.load_config(Path(result_dir) / CONFIG_FILENAME)
+
+    with plt.rc_context(figure_style()):
+        figure, axes = plt.subplots()
+        for k, (name, result) in enumerate(results.items()):
+            guiding_centre = guiding_centre_from_position(
+                result["x"].values,
+                result["u"].values,
+                result["b_field"].values,
+                q=run_config.q,
+                m=run_config.m,
+            )
+            major_radius = np.hypot(guiding_centre[..., 0], guiding_centre[..., 1])
+            labels = _pitch_angle_labels(result)
+            for i in range(guiding_centre.shape[1]):
+                color = _LINE_COLORS[i % len(_LINE_COLORS)]
+                label = labels[i] if len(results) == 1 else f"{name}, {labels[i]}"
+                axes.plot(
+                    major_radius[:, i],
+                    guiding_centre[:, i, 2],
+                    color=color,
+                    linestyle=_LINE_STYLES[k % len(_LINE_STYLES)],
+                    linewidth=0.8,
+                    label=label,
+                    zorder=guiding_centre.shape[1] - i,
+                )
+                axes.plot(
+                    major_radius[0, i],
+                    guiding_centre[0, i, 2],
+                    "o",
+                    color=color,
+                )
+        if run_config.field.kind == "carbajal":
+            axes.plot(run_config.field.r0, 0.0, "k+", markersize=12)
+        axes.set_aspect("equal", adjustable="datalim")
+        axes.set_xlabel("R [m]")
+        axes.set_ylabel("Z [m]")
+        axes.set_title("Guiding-centre orbits in a poloidal plane")
+        axes.legend(fontsize=11)
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.suptitle(result_dir)
+        plt.show()
+    return figure
+
+
 def parallel_velocity(
     result_dir: str | Path,
     pusher: str | Sequence[str] | None = None,
@@ -3019,6 +3100,7 @@ def orbit_guiding_centre_3D(result_dir: str | Path,
     *,
     r0: float | None = None,
     a: float | None = None,
+    one_particle = None,
     show: bool = True,
     save_path: str | Path | None = None,
 ) -> Figure:
@@ -3083,76 +3165,256 @@ def orbit_guiding_centre_3D(result_dir: str | Path,
 
         # --- Optional reference torus surface, drawn first so it sits behind ---
         if r0 is not None:
-            r0_mm = r0 * _METRES_TO_MILLIMETRES
-            a_mm = a * _METRES_TO_MILLIMETRES
             theta_grid, phi_grid = np.meshgrid(
                 np.linspace(0, 2 * np.pi, 60), np.linspace(0, 2 * np.pi, 100)
             )
-            big_r = r0_mm + a_mm * np.cos(theta_grid)
+            big_r = r0 + a * np.cos(theta_grid)
             xt = big_r * np.cos(phi_grid)
             yt = big_r * np.sin(phi_grid)
-            zt = a_mm * np.sin(theta_grid)
+            zt = a * np.sin(theta_grid)
             axes.plot_surface(
                 xt, yt, zt, color="lightgray", alpha=0.25, linewidth=0, shade=True
             )
 
         # --- Trajectories, same convention as orbit_xz ---
-        all_x = []
+  
         for k, (name, result) in enumerate(results.items()):
             x = result["x"].values  # (n_saved, n_part, 3), in metres
             gc = (
                 guiding_centre_from_position(
                     x, result["u"].values, result["b_field"].values
                 )
-                * _METRES_TO_MILLIMETRES
+                
             )
-            all_x.append(x)
-            n_part = x.shape[1]
-            for i in range(n_part):
-                if len(results) == 1:
-                    label = f"particle {i}"
-                elif n_part == 1:
-                    label = name
-                else:
-                    label = f"{name}, particle {i}"
+
+            if one_particle is  None:
+        
+                n_part = gc.shape[1]
+                for i in range(n_part):
+                    if len(results) == 1:
+                        label = f"particle {i}"
+                    elif n_part == 1:
+                        label = name
+                    else:
+                        label = f"{name}, particle {i}"
+                    (line,) = axes.plot(
+                        gc[:, i, 0],
+                        gc[:, i, 1],
+                        gc[:, i, 2],
+                        linestyle=_LINE_STYLES[k % len(_LINE_STYLES)],
+                        label=label,
+                    )
+                    axes.plot(
+                        [gc[0, i, 0]],
+                        [gc[0, i, 1]],
+                        [gc[0, i, 2]],
+                        "o",
+                        color=line.get_color(),
+                )
+            else: 
+                gc = gc[:, one_particle]
                 (line,) = axes.plot(
-                    gc[:, i, 0],
-                    gc[:, i, 1],
-                    gc[:, i, 2],
+                    gc[:, 0],
+                    gc[:, 1],
+                    gc[:, 2],
                     linestyle=_LINE_STYLES[k % len(_LINE_STYLES)],
-                    label=label,
+                    label=name,
                 )
                 axes.plot(
-                    [gc[0, i, 0]],
-                    [gc[0, i, 1]],
-                    [gc[0, i, 2]],
+                    [gc[0, 0]],
+                    [gc[0, 1]],
+                    [gc[0, 2]],
                     "o",
                     color=line.get_color(),
                 )
 
         if r0 is not None:
             theta = np.linspace(0, 2 * np.pi, 100)
-            axes.plot(r0_mm * np.cos(theta), r0_mm * np.sin(theta), "--")
-        axes.set_xlabel("x [mm]")
-        axes.set_ylabel("y [mm]")
-        axes.set_zlabel("z [mm]")
+            axes.plot(r0 * np.cos(theta), r0 * np.sin(theta), "--")
+        axes.set_xlabel("x [m]")
+        axes.set_ylabel("y [m]")
+        axes.set_zlabel("z [m]")
         dt = next(iter(results.values())).attrs["dt"]
         if len(results) == 1:
             title = f"3D guiding orbit, pusher {names[0]!r}, dt = {dt:.3g} s"
         else:
             title = f"3D guiding orbit, dt = {dt:.3g} s"
         axes.set_title(title)
+        
 
-        # Equal aspect ratio: matplotlib 3D does not do this automatically.
-        # stacked = np.concatenate(all_x, axis=0).reshape(-1, 3)
-        # centre = (stacked.max(axis=0) + stacked.min(axis=0)) / 2
-        # half_range = (stacked.max(axis=0) - stacked.min(axis=0)).max() / 2
-        # axes.set_xlim(centre[0] - half_range, centre[0] + half_range)
-        # axes.set_ylim(centre[1] - half_range, centre[1] + half_range)
-        # axes.set_zlim(centre[2] - half_range, centre[2] + half_range)
+  
 
         if len(axes.get_legend_handles_labels()[0]) > 1:
             axes.legend()
+
+    if save_path is not None:
+        save_figure(figure, save_path)
+    if show:
+        plt.suptitle(result_dir)
+        plt.show()
+
+    return figure
+
+
+def visu_toroidal_fields(
+    config: RunConfig | str | Path,
+    *,
+    r0: float | None = None,
+    a: float | None = None,
+    show: bool = True,
+    save_path: str | Path | None = None,
+) -> Figure:
+    """Plot Carbajal magnetic fields in poloidal sections and along the midplane.
+
+    ``config`` can be a loaded :class:`RunConfig` or the path to its YAML file.
+    The left panel shows the poloidal field vectors at the near and far sides of
+    the torus. The right panel shows the magnetic-field magnitude along the
+    midplane, over ``R0 - a <= R <= R0 + a``.
+
+    Parameters
+    ----------
+    config : RunConfig or str or pathlib.Path
+        Run configuration with a Carbajal field.
+    r0 : float, optional
+        Major radius [m]. Defaults to the value in the configuration.
+    a : float, optional
+        Minor radius [m] of the displayed poloidal cross-section. Must be smaller
+        than ``r0``.
+    show : bool, optional
+        Open the figure in a window. Default ``True``.
+    save_path : str or pathlib.Path, optional
+        If given, save the figure as PNG and PDF (no extension).
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Figure with the poloidal field sections and midplane field profile.
+
+    Raises
+    ------
+    TypeError
+        If ``config`` is not a ``RunConfig`` or a path.
+    ValueError
+        If the configuration is not for a Carbajal field, ``a`` is missing or
+        invalid, or the requested geometry is invalid.
+    """
+    if isinstance(config, (str, Path)):
+        run_config = load_config(config)
+    elif isinstance(config, RunConfig):
+        run_config = config
+    else:
+        raise TypeError(
+            "config must be a RunConfig or a path to a run configuration, "
+            f"got {type(config).__name__}"
+        )
+    if run_config.field.kind != "carbajal":
+        raise ValueError(
+            "visu_toroidal_fields requires a Carbajal field configuration, "
+            f"got {run_config.field.kind!r}"
+        )
+
+    r0 = run_config.field.r0 if r0 is None else r0
+    if a is None:
+        raise ValueError("a (minor radius) must be provided")
+    if (
+        not np.isfinite(r0)
+        or not np.isfinite(a)
+        or r0 <= 0.0
+        or a <= 0.0
+        or a >= r0
+    ):
+        raise ValueError(
+            f"r0 and a must satisfy 0 < a < r0; got r0={r0!r}, a={a!r}"
+        )
+
+    field = fields.carbajal(
+        b0=run_config.field.b0,
+        r0=run_config.field.r0,
+        q0=run_config.field.q0,
+        lam=run_config.field.lam,
+        e0=run_config.field.e0,
+    )
+    sample_count = 20
+    minor_radius = np.linspace(0.0, a, sample_count)
+    poloidal_angle = np.linspace(0.0, 2.0 * np.pi, sample_count)
+    radius_grid, angle_grid = np.meshgrid(minor_radius, poloidal_angle)
+
+    near_x = np.zeros_like(radius_grid)
+    near_y = r0 + radius_grid * np.cos(angle_grid)
+    z = radius_grid * np.sin(angle_grid)
+    far_x = np.zeros_like(radius_grid)
+    far_y = -(r0 + radius_grid * np.cos(angle_grid))
+
+    def field_components(
+        x: NDArray[np.float64], y: NDArray[np.float64], z: NDArray[np.float64]
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        positions = np.stack((x.ravel(), y.ravel(), z.ravel()), axis=-1)
+        _, magnetic_field = field(positions, 0.0)
+        return tuple(
+            component.reshape(x.shape)
+            for component in np.moveaxis(magnetic_field, -1, 0)
+        )
+
+    _, by_near, bz_near = field_components(near_x, near_y, z)
+    _, by_far, bz_far = field_components(far_x, far_y, z)
+
+    major_radius = np.linspace(r0 - a, r0 + a, 200)
+    midplane_positions = np.column_stack(
+        (np.zeros_like(major_radius), major_radius, np.zeros_like(major_radius))
+    )
+    _, midplane_field = field(midplane_positions, 0.0)
+    field_magnitude = np.linalg.norm(midplane_field, axis=-1)
+
+    with plt.rc_context(figure_style()):
+        figure, (section_axes, profile_axes) = plt.subplots(
+            2, 1, figsize=(6, 6), constrained_layout=True
+        )
+        section_axes.quiver(
+            near_y,
+            z,
+            by_near,
+            bz_near,
+            color="C0",
+            angles="xy",
+            scale_units="xy",
+            scale=5,
+            width=0.005,
+        )
+        section_axes.quiver(
+            far_y,
+            z,
+            by_far,
+            bz_far,
+            color="C1",
+            angles="xy",
+            scale_units="xy",
+            scale=5,
+            width=0.005,
+        )
+        circle_angle = np.linspace(0.0, 2.0 * np.pi, 200)
+        section_axes.plot(
+            r0 + a * np.cos(circle_angle),
+            a * np.sin(circle_angle),
+            color="C0",
+        )
+        section_axes.plot(
+            -(r0 + a * np.cos(circle_angle)),
+            a * np.sin(circle_angle),
+            color="C1",
+        )
+        section_axes.axvline(0.0, color="grey", linestyle="--", linewidth=0.8)
+        section_axes.set_xlabel("Y [m]")
+        section_axes.set_ylabel("Z [m]")
+        section_axes.set_aspect("equal")
+        section_axes.legend(loc="upper right")
+        section_axes.set_title("Poloidal magnetic field")
+
+        profile_axes.plot(major_radius, field_magnitude)
+        profile_axes.axvline(r0 - a, color="grey", linestyle="--", linewidth=0.8)
+        profile_axes.axvline(r0 + a, color="grey", linestyle="--", linewidth=0.8)
+        profile_axes.set_xlabel("R [m]")
+        profile_axes.set_ylabel("|B| [T]")
+        profile_axes.set_title("Magnetic-field magnitude at Z = 0")
 
     if save_path is not None:
         save_figure(figure, save_path)
